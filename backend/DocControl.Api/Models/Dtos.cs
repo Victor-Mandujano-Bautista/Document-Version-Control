@@ -23,6 +23,20 @@ public class SolicitudCheckin
     public bool VersionMayor { get; set; }
 }
 
+public class SolicitudRevision
+{
+    public string Usuario { get; set; } = string.Empty;
+    public string Rol { get; set; } = string.Empty;
+}
+
+public class SolicitudDictamen
+{
+    public string Usuario { get; set; } = string.Empty;
+    public string Rol { get; set; } = string.Empty;
+    public bool Aprobar { get; set; }
+    public string Comentario { get; set; } = string.Empty;
+}
+
 public class SolicitudDesbloqueoForzado
 {
     public string Usuario { get; set; } = string.Empty;
@@ -41,6 +55,9 @@ public class DocumentoResumen
     public string Departamento { get; set; } = string.Empty;
     public string VersionActual { get; set; } = string.Empty;
     public string Estado { get; set; } = string.Empty;
+    public string EstadoRevision { get; set; } = string.Empty;
+    public string? RevisadoPor { get; set; }
+    public string? ComentarioRevision { get; set; }
     public BloqueoResumen? Bloqueo { get; set; }
     public DateTime FechaCreacion { get; set; }
     public DateTime FechaUltimaModificacion { get; set; }

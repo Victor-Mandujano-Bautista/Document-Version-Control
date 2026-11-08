@@ -1,4 +1,6 @@
+using DocControl.Api.Data;
 using DocControl.Api.Services;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -13,8 +15,12 @@ builder.Services.AddControllers()
 
 builder.Services.AddOpenApi();
 
-// Registrar el servicio de workspace documental como Singleton (en memoria)
-builder.Services.AddSingleton<DocumentWorkspaceService>();
+// Conectar con SQL Server
+builder.Services.AddDbContext<AppDbContext>(options =>
+    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+// Servicio centinela: libera bloqueos expirados cada 30 segundos
+builder.Services.AddHostedService<LockExpirationWorker>();
 
 var app = builder.Build();
 
