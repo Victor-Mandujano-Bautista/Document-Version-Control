@@ -23,4 +23,7 @@ public class VersionDocumento
     public string HashSHA256 { get; set; } = string.Empty;
     public DateTime FechaCreacion { get; set; }
     public long TamanoBytes { get; set; }
+
+    /// <summary>¿Por qué se hizo el cambio? (RF-06). Complementa a Comentario (¿qué se hizo?).</summary>
+    public string MotivoCambio { get; set; } = string.Empty;
 }

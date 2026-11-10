@@ -22,9 +22,100 @@ namespace DocControl.Api.Migrations
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
 
+            modelBuilder.Entity("DocControl.Api.Models.Carpeta", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int?>("CarpetaPadreId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Color")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("CreadoPor")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<DateTime>("FechaCreacion")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Nombre")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Nombre", "CarpetaPadreId")
+                        .IsUnique()
+                        .HasFilter("[CarpetaPadreId] IS NOT NULL");
+
+                    b.ToTable("Carpetas");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            Color = "Rojo",
+                            CreadoPor = "Elena - Administrador",
+                            FechaCreacion = new DateTime(2026, 7, 4, 12, 0, 0, 0, DateTimeKind.Utc),
+                            Nombre = "Recursos Humanos"
+                        },
+                        new
+                        {
+                            Id = 2,
+                            Color = "Verde",
+                            CreadoPor = "Elena - Administrador",
+                            FechaCreacion = new DateTime(2026, 9, 2, 12, 0, 0, 0, DateTimeKind.Utc),
+                            Nombre = "Finanzas"
+                        },
+                        new
+                        {
+                            Id = 3,
+                            Color = "Azul",
+                            CreadoPor = "Elena - Administrador",
+                            FechaCreacion = new DateTime(2026, 10, 17, 12, 0, 0, 0, DateTimeKind.Utc),
+                            Nombre = "Dirección General"
+                        },
+                        new
+                        {
+                            Id = 4,
+                            Color = "Morado",
+                            CreadoPor = "Roberto - Revisor",
+                            FechaCreacion = new DateTime(2026, 4, 15, 12, 0, 0, 0, DateTimeKind.Utc),
+                            Nombre = "Legal"
+                        },
+                        new
+                        {
+                            Id = 5,
+                            Color = "Cian",
+                            CreadoPor = "Roberto - Revisor",
+                            FechaCreacion = new DateTime(2026, 9, 17, 12, 0, 0, 0, DateTimeKind.Utc),
+                            Nombre = "Tecnología"
+                        },
+                        new
+                        {
+                            Id = 6,
+                            Color = "Amarillo",
+                            CreadoPor = "Roberto - Revisor",
+                            FechaCreacion = new DateTime(2026, 10, 25, 12, 0, 0, 0, DateTimeKind.Utc),
+                            Nombre = "Calidad"
+                        });
+                });
+
             modelBuilder.Entity("DocControl.Api.Models.Documento", b =>
                 {
                     b.Property<int>("Id")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("CarpetaId")
                         .HasColumnType("int");
 
                     b.Property<string>("Codigo")
@@ -41,6 +132,9 @@ namespace DocControl.Api.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
 
+                    b.Property<bool>("Eliminado")
+                        .HasColumnType("bit");
+
                     b.Property<string>("Estado")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -53,7 +147,15 @@ namespace DocControl.Api.Migrations
                         .HasColumnType("nvarchar(20)")
                         .HasDefaultValue("Aprobado");
 
+                    b.Property<string>("Etiquetas")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
                     b.Property<DateTime>("FechaCreacion")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("FechaEliminacion")
                         .HasColumnType("datetime2");
 
                     b.Property<DateTime>("FechaUltimaModificacion")
@@ -88,8 +190,12 @@ namespace DocControl.Api.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("CarpetaId");
+
                     b.HasIndex("Codigo")
                         .IsUnique();
+
+                    b.HasIndex("Eliminado");
 
                     b.ToTable("Documentos");
 
@@ -97,10 +203,13 @@ namespace DocControl.Api.Migrations
                         new
                         {
                             Id = 1,
+                            CarpetaId = 1,
                             Codigo = "POL-RH-001",
                             Departamento = "Recursos Humanos",
+                            Eliminado = false,
                             Estado = "Disponible",
                             EstadoRevision = "Aprobado",
+                            Etiquetas = "Oficial,Normativo",
                             FechaCreacion = new DateTime(2026, 7, 4, 12, 0, 0, 0, DateTimeKind.Utc),
                             FechaUltimaModificacion = new DateTime(2026, 10, 27, 12, 0, 0, 0, DateTimeKind.Utc),
                             Nombre = "Política de Seguridad e Higiene",
@@ -111,10 +220,13 @@ namespace DocControl.Api.Migrations
                         new
                         {
                             Id = 2,
+                            CarpetaId = 2,
                             Codigo = "FIN-PRE-002",
                             Departamento = "Finanzas",
+                            Eliminado = false,
                             Estado = "Disponible",
                             EstadoRevision = "Aprobado",
+                            Etiquetas = "Confidencial,Contabilidad",
                             FechaCreacion = new DateTime(2026, 9, 2, 12, 0, 0, 0, DateTimeKind.Utc),
                             FechaUltimaModificacion = new DateTime(2026, 10, 30, 12, 0, 0, 0, DateTimeKind.Utc),
                             Nombre = "Presupuesto Anual 2026",
@@ -125,10 +237,13 @@ namespace DocControl.Api.Migrations
                         new
                         {
                             Id = 3,
+                            CarpetaId = 3,
                             Codigo = "DIR-EST-003",
                             Departamento = "Dirección General",
+                            Eliminado = false,
                             Estado = "Disponible",
                             EstadoRevision = "Aprobado",
+                            Etiquetas = "Urgente,Confidencial",
                             FechaCreacion = new DateTime(2026, 10, 17, 12, 0, 0, 0, DateTimeKind.Utc),
                             FechaUltimaModificacion = new DateTime(2026, 10, 17, 12, 0, 0, 0, DateTimeKind.Utc),
                             Nombre = "Plan Estratégico 2026-2028",
@@ -139,10 +254,13 @@ namespace DocControl.Api.Migrations
                         new
                         {
                             Id = 4,
+                            CarpetaId = 4,
                             Codigo = "LEG-CON-004",
                             Departamento = "Legal",
+                            Eliminado = false,
                             Estado = "Disponible",
                             EstadoRevision = "Aprobado",
+                            Etiquetas = "Oficial,Legal",
                             FechaCreacion = new DateTime(2026, 4, 15, 12, 0, 0, 0, DateTimeKind.Utc),
                             FechaUltimaModificacion = new DateTime(2026, 10, 22, 12, 0, 0, 0, DateTimeKind.Utc),
                             Nombre = "Contrato Marco Proveedores",
@@ -153,10 +271,13 @@ namespace DocControl.Api.Migrations
                         new
                         {
                             Id = 5,
+                            CarpetaId = 5,
                             Codigo = "TI-MAN-005",
                             Departamento = "Tecnología",
+                            Eliminado = false,
                             Estado = "Disponible",
                             EstadoRevision = "Aprobado",
+                            Etiquetas = "Interno",
                             FechaCreacion = new DateTime(2026, 9, 17, 12, 0, 0, 0, DateTimeKind.Utc),
                             FechaUltimaModificacion = new DateTime(2026, 10, 24, 12, 0, 0, 0, DateTimeKind.Utc),
                             Nombre = "Manual de Operaciones TI",
@@ -167,10 +288,13 @@ namespace DocControl.Api.Migrations
                         new
                         {
                             Id = 6,
+                            CarpetaId = 6,
                             Codigo = "CAL-AUD-006",
                             Departamento = "Calidad",
+                            Eliminado = false,
                             Estado = "Disponible",
                             EstadoRevision = "Aprobado",
+                            Etiquetas = "Urgente,Auditoría",
                             FechaCreacion = new DateTime(2026, 10, 25, 12, 0, 0, 0, DateTimeKind.Utc),
                             FechaUltimaModificacion = new DateTime(2026, 10, 25, 12, 0, 0, 0, DateTimeKind.Utc),
                             Nombre = "Informe de Auditoría Interna Q3",
@@ -232,6 +356,11 @@ namespace DocControl.Api.Migrations
                         .IsRequired()
                         .HasMaxLength(30)
                         .HasColumnType("nvarchar(30)");
+
+                    b.Property<string>("DatosMaquina")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
 
                     b.Property<DateTime>("FechaHora")
                         .HasColumnType("datetime2");
@@ -297,6 +426,11 @@ namespace DocControl.Api.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("nvarchar(64)");
 
+                    b.Property<string>("MotivoCambio")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
+
                     b.Property<string>("NombreArchivo")
                         .IsRequired()
                         .HasMaxLength(260)
@@ -332,9 +466,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 1,
                             FechaCreacion = new DateTime(2026, 7, 4, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "5ae72aff9bcb02e91716a8a8e1c5322735af44c3587c6dd3de69fd2f53766fc8",
+                            MotivoCambio = "Requerimiento de cumplimiento normativo interno",
                             NombreArchivo = "POL-RH-001_v1.0.docx",
                             NumeroVersion = 1,
-                            TamanoBytes = 245000L,
+                            TamanoBytes = 245760L,
                             VersionTexto = "v1.0"
                         },
                         new
@@ -345,9 +480,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 1,
                             FechaCreacion = new DateTime(2026, 8, 3, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "2ac401711f25a79bf803882e90243aa89e99ddf1646746dc791b4a0c3de3aefd",
+                            MotivoCambio = "Observaciones de la revisión de estilo corporativo",
                             NombreArchivo = "POL-RH-001_v1.1.docx",
                             NumeroVersion = 2,
-                            TamanoBytes = 248000L,
+                            TamanoBytes = 248832L,
                             VersionTexto = "v1.1"
                         },
                         new
@@ -358,9 +494,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 1,
                             FechaCreacion = new DateTime(2026, 10, 2, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "9309be652408157b962022efa590796c02fa32d54c2fa7561fd6a7b748ac54bf",
+                            MotivoCambio = "Entrada en vigor de la NOM-035-STPS",
                             NombreArchivo = "POL-RH-001_v2.0.docx",
                             NumeroVersion = 3,
-                            TamanoBytes = 312000L,
+                            TamanoBytes = 312320L,
                             VersionTexto = "v2.0"
                         },
                         new
@@ -371,9 +508,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 1,
                             FechaCreacion = new DateTime(2026, 10, 27, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "038f208458abe9b2ad91e6dce73ca1ebbda28f87ff5c28caa85c0874e8132d69",
+                            MotivoCambio = "Hallazgo del simulacro de evacuación",
                             NombreArchivo = "POL-RH-001_v2.1.docx",
                             NumeroVersion = 4,
-                            TamanoBytes = 318000L,
+                            TamanoBytes = 318464L,
                             VersionTexto = "v2.1"
                         },
                         new
@@ -384,9 +522,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 2,
                             FechaCreacion = new DateTime(2026, 9, 2, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "d03dfac20c425c09fd08a643dd99d946413df3eca2650657d2abb92fb9d9c422",
+                            MotivoCambio = "Cierre del ciclo de planeación anual",
                             NombreArchivo = "FIN-PRE-002_v1.0.xlsx",
                             NumeroVersion = 1,
-                            TamanoBytes = 1520000L,
+                            TamanoBytes = 1556480L,
                             VersionTexto = "v1.0"
                         },
                         new
@@ -397,9 +536,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 2,
                             FechaCreacion = new DateTime(2026, 10, 2, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "952f1b7d174c84bd2dd6c1ac77780e589f74d5fd89372b10a9cdf74e8d535e71",
+                            MotivoCambio = "Solicitud de TI por renovación de licencias",
                             NombreArchivo = "FIN-PRE-002_v1.1.xlsx",
                             NumeroVersion = 2,
-                            TamanoBytes = 1580000L,
+                            TamanoBytes = 1617920L,
                             VersionTexto = "v1.1"
                         },
                         new
@@ -410,9 +550,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 2,
                             FechaCreacion = new DateTime(2026, 10, 30, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "ede3f366d5dc8fa50022d29de8ac0f74962a6ee76a8bfb81022d26a3f6c90a83",
+                            MotivoCambio = "Petición del comité de finanzas",
                             NombreArchivo = "FIN-PRE-002_v1.2.xlsx",
                             NumeroVersion = 3,
-                            TamanoBytes = 1640000L,
+                            TamanoBytes = 1679360L,
                             VersionTexto = "v1.2"
                         },
                         new
@@ -423,9 +564,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 3,
                             FechaCreacion = new DateTime(2026, 10, 17, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "88c2ad88145bb044358f9c3ca9f32d67ae906add8c0e06ee537658960b1cc870",
+                            MotivoCambio = "Sesión del consejo directivo",
                             NombreArchivo = "DIR-EST-003_v1.0.pptx",
                             NumeroVersion = 1,
-                            TamanoBytes = 4200000L,
+                            TamanoBytes = 4300800L,
                             VersionTexto = "v1.0"
                         },
                         new
@@ -436,9 +578,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 4,
                             FechaCreacion = new DateTime(2026, 4, 15, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "76ec258109223d7dd16914dd3dd31420660a405e0268b6085b10a428a8e5d589",
+                            MotivoCambio = "Alta del nuevo esquema de proveedores",
                             NombreArchivo = "LEG-CON-004_v1.0.pdf",
                             NumeroVersion = 1,
-                            TamanoBytes = 890000L,
+                            TamanoBytes = 911360L,
                             VersionTexto = "v1.0"
                         },
                         new
@@ -449,9 +592,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 4,
                             FechaCreacion = new DateTime(2026, 6, 4, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "3020e4b480a8f393f2d7f9562fedbcd7187eeb8f7780a311062528243837cdea",
+                            MotivoCambio = "Recomendación de auditoría legal",
                             NombreArchivo = "LEG-CON-004_v1.1.pdf",
                             NumeroVersion = 2,
-                            TamanoBytes = 920000L,
+                            TamanoBytes = 942080L,
                             VersionTexto = "v1.1"
                         },
                         new
@@ -462,9 +606,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 4,
                             FechaCreacion = new DateTime(2026, 8, 13, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "e7af159ac29c6a106e14922605e9368e1698dee1887d9180233e9a95a8700557",
+                            MotivoCambio = "Reforma a la legislación de adquisiciones",
                             NombreArchivo = "LEG-CON-004_v2.0.pdf",
                             NumeroVersion = 3,
-                            TamanoBytes = 1100000L,
+                            TamanoBytes = 1126400L,
                             VersionTexto = "v2.0"
                         },
                         new
@@ -475,9 +620,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 4,
                             FechaCreacion = new DateTime(2026, 9, 22, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "e33ac1814461a4cd2125fd3612d6763529020078ad621e1746b801a429d401c3",
+                            MotivoCambio = "Ajuste inflacionario anual",
                             NombreArchivo = "LEG-CON-004_v2.1.pdf",
                             NumeroVersion = 4,
-                            TamanoBytes = 1120000L,
+                            TamanoBytes = 1146880L,
                             VersionTexto = "v2.1"
                         },
                         new
@@ -488,9 +634,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 4,
                             FechaCreacion = new DateTime(2026, 10, 22, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "e7077df6c15ccf391317194509d305c52a584320b817d061cd85d71c10db8e12",
+                            MotivoCambio = "Formalización y firma de las partes",
                             NombreArchivo = "LEG-CON-004_v3.0.pdf",
                             NumeroVersion = 5,
-                            TamanoBytes = 1250000L,
+                            TamanoBytes = 1280000L,
                             VersionTexto = "v3.0"
                         },
                         new
@@ -501,9 +648,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 5,
                             FechaCreacion = new DateTime(2026, 9, 17, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "961c5cc3edf9f1cc47b8929fd9f41a79bba6f789861c51c67db5e558a761f55a",
+                            MotivoCambio = "Estandarización de procesos del área",
                             NombreArchivo = "TI-MAN-005_v1.0.docx",
                             NumeroVersion = 1,
-                            TamanoBytes = 520000L,
+                            TamanoBytes = 532480L,
                             VersionTexto = "v1.0"
                         },
                         new
@@ -514,9 +662,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 5,
                             FechaCreacion = new DateTime(2026, 10, 24, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "36db2ab87be70808f96142c329492ddaf98e9a0ce6446976c3fc3a164a696cb4",
+                            MotivoCambio = "Plan de continuidad del negocio (DRP)",
                             NombreArchivo = "TI-MAN-005_v1.1.docx",
                             NumeroVersion = 2,
-                            TamanoBytes = 580000L,
+                            TamanoBytes = 593920L,
                             VersionTexto = "v1.1"
                         },
                         new
@@ -527,9 +676,10 @@ namespace DocControl.Api.Migrations
                             DocumentoId = 6,
                             FechaCreacion = new DateTime(2026, 10, 25, 12, 0, 0, 0, DateTimeKind.Utc),
                             HashSHA256 = "15942bc4e7e29be8a854d5960c5a82adc54bf81d022bda8a0bd71d1ecf428518",
+                            MotivoCambio = "Programa anual de auditorías ISO 9001",
                             NombreArchivo = "CAL-AUD-006_v1.0.pdf",
                             NumeroVersion = 1,
-                            TamanoBytes = 2100000L,
+                            TamanoBytes = 2150400L,
                             VersionTexto = "v1.0"
                         });
                 });

@@ -12,5 +12,8 @@ public class RegistroBitacora
     public string Version { get; set; } = string.Empty;
     public AccionBitacora Accion { get; set; }
     public string Observaciones { get; set; } = string.Empty;
+
+    /// <summary>IP y User-Agent capturados automáticamente de la petición HTTP.</summary>
+    public string DatosMaquina { get; set; } = string.Empty;
 }
 

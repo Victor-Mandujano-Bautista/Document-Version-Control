@@ -89,7 +89,8 @@ public class LockExpirationWorker : BackgroundService
                 Version = doc.VersionActual,
                 Accion = AccionBitacora.EXPIRACION_AUTOMATICA,
                 Observaciones = $"Bloqueo liberado automáticamente por el servidor al agotar el tiempo de concesión. " +
-                                $"Usuario afectado: {usuarioBloqueador} ({rolBloqueador})."
+                                $"Usuario afectado: {usuarioBloqueador} ({rolBloqueador}).",
+                DatosMaquina = $"Servidor: {Environment.MachineName} | Proceso: LockExpirationWorker"
             });
 
             _logger.LogInformation(

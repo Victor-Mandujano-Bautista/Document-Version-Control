@@ -15,6 +15,7 @@ public class AppDbContext : DbContext
     public DbSet<VersionDocumento> Versiones => Set<VersionDocumento>();
     public DbSet<InfoBloqueo> Bloqueos => Set<InfoBloqueo>();
     public DbSet<RegistroBitacora> Bitacora => Set<RegistroBitacora>();
+    public DbSet<Carpeta> Carpetas => Set<Carpeta>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
@@ -44,6 +45,10 @@ public class AppDbContext : DbContext
             e.Property(d => d.RevisadoPor).HasMaxLength(100);
             e.Property(d => d.ComentarioRevision).HasMaxLength(1000);
             e.Property(d => d.RowVersion).IsRowVersion();
+            e.Property(d => d.Etiquetas).IsRequired().HasMaxLength(500);
+            e.Property(d => d.FechaEliminacion).HasConversion<UtcDateTimeConverter>();
+            e.HasIndex(d => d.Eliminado); // filtro frecuente activos / papelera
+            e.HasIndex(d => d.CarpetaId);
 
             e.HasMany(d => d.HistorialVersiones)
                 .WithOne()
@@ -65,6 +70,7 @@ public class AppDbContext : DbContext
             e.Property(v => v.Comentario).IsRequired().HasMaxLength(1000);
             e.Property(v => v.HashSHA256).IsRequired().HasMaxLength(64);
             e.Property(v => v.RutaArchivo).HasMaxLength(400); // nullable: versiones sembradas no tienen binario
+            e.Property(v => v.MotivoCambio).IsRequired().HasMaxLength(1000);
             e.Ignore(v => v.TieneArchivo); // propiedad calculada
         });
 
@@ -88,11 +94,22 @@ public class AppDbContext : DbContext
             e.Property(r => r.Version).IsRequired().HasMaxLength(20);
             e.Property(r => r.Accion).HasConversion<string>().HasMaxLength(30);
             e.Property(r => r.Observaciones).IsRequired().HasMaxLength(2000);
+            e.Property(r => r.DatosMaquina).IsRequired().HasMaxLength(500);
             e.HasIndex(r => r.FechaHora);
+        });
+
+        modelBuilder.Entity<Carpeta>(e =>
+        {
+            e.HasKey(c => c.Id);
+            e.Property(c => c.Nombre).IsRequired().HasMaxLength(100);
+            e.HasIndex(c => new { c.Nombre, c.CarpetaPadreId }).IsUnique();
+            e.Property(c => c.CreadoPor).IsRequired().HasMaxLength(100);
+            e.Property(c => c.Color).IsRequired().HasMaxLength(20);
         });
 
         // ── Data Seeding ──
         var seed = SeedData.Crear();
+        modelBuilder.Entity<Carpeta>().HasData(seed.Carpetas);
         modelBuilder.Entity<Documento>().HasData(seed.Documentos);
         modelBuilder.Entity<VersionDocumento>().HasData(seed.Versiones);
     }
@@ -114,15 +131,27 @@ internal static class SeedData
 {
     private static readonly DateTime Base = new(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc);
 
-    private record V(string Version, string Autor, string Comentario, int DiasAtras, long Bytes);
+    /// <summary>Versión sembrada: Comentario = ¿qué se hizo?, Motivo = ¿por qué se hizo?</summary>
+    private record V(string Version, string Autor, string Comentario, int DiasAtras, long Bytes, string Motivo);
 
-    public static (object[] Documentos, object[] Versiones) Crear()
+    public static (object[] Carpetas, object[] Documentos, object[] Versiones) Crear()
     {
+        var carpetas = new object[]
+        {
+            new { Id = 1, Nombre = "Recursos Humanos", Color = "Rojo", CreadoPor = "Elena - Administrador", FechaCreacion = Base.AddDays(-120) },
+            new { Id = 2, Nombre = "Finanzas", Color = "Verde", CreadoPor = "Elena - Administrador", FechaCreacion = Base.AddDays(-60) },
+            new { Id = 3, Nombre = "Dirección General", Color = "Azul", CreadoPor = "Elena - Administrador", FechaCreacion = Base.AddDays(-15) },
+            new { Id = 4, Nombre = "Legal", Color = "Morado", CreadoPor = "Roberto - Revisor", FechaCreacion = Base.AddDays(-200) },
+            new { Id = 5, Nombre = "Tecnología", Color = "Cian", CreadoPor = "Roberto - Revisor", FechaCreacion = Base.AddDays(-45) },
+            new { Id = 6, Nombre = "Calidad", Color = "Amarillo", CreadoPor = "Roberto - Revisor", FechaCreacion = Base.AddDays(-7) }
+        };
+
         var docs = new List<object>();
         var vers = new List<object>();
         int versionId = 1;
 
-        void Agregar(int id, string codigo, string nombre, TipoDocumento tipo, string depto, int creadoHaceDias, params V[] historial)
+        void Agregar(int id, string codigo, string nombre, TipoDocumento tipo, string depto, int creadoHaceDias,
+            string etiquetas, params V[] historial)
         {
             string ext = tipo switch
             {
@@ -140,12 +169,15 @@ internal static class SeedData
                 Nombre = nombre,
                 Tipo = tipo,
                 Departamento = depto,
+                CarpetaId = id,
                 VersionActual = ultima.Version,
                 NumeroVersionActual = historial.Length,
                 Estado = EstadoDocumento.Disponible,
                 EstadoRevision = EstadoRevision.Aprobado,
                 FechaCreacion = Base.AddDays(-creadoHaceDias),
-                FechaUltimaModificacion = Base.AddDays(-ultima.DiasAtras)
+                FechaUltimaModificacion = Base.AddDays(-ultima.DiasAtras),
+                Eliminado = false,
+                Etiquetas = etiquetas
             });
 
             for (int i = 0; i < historial.Length; i++)
@@ -160,6 +192,7 @@ internal static class SeedData
                     NombreArchivo = $"{codigo}_{v.Version}.{ext}",
                     Autor = v.Autor,
                     Comentario = v.Comentario,
+                    MotivoCambio = v.Motivo,
                     HashSHA256 = Hash($"{codigo}|{v.Version}|{v.Comentario}"),
                     FechaCreacion = Base.AddDays(-v.DiasAtras),
                     TamanoBytes = v.Bytes
@@ -168,34 +201,40 @@ internal static class SeedData
         }
 
         Agregar(1, "POL-RH-001", "Política de Seguridad e Higiene", TipoDocumento.Word, "Recursos Humanos", 120,
-            new V("v1.0", "Lic. María López", "Creación inicial del documento", 120, 245000),
-            new V("v1.1", "Lic. María López", "Correcciones de formato y ortografía", 90, 248000),
-            new V("v2.0", "Carlos Ruiz", "Actualización mayor: nuevas normas NOM-035", 30, 312000),
-            new V("v2.1", "Carlos Ruiz", "Ajuste en sección 4.2 - Protocolo de emergencia", 5, 318000));
+            "Oficial,Normativo",
+            new V("v1.0", "Lic. María López", "Creación inicial del documento", 120, 245_760, "Requerimiento de cumplimiento normativo interno"),
+            new V("v1.1", "Lic. María López", "Correcciones de formato y ortografía", 90, 248_832, "Observaciones de la revisión de estilo corporativo"),
+            new V("v2.0", "Carlos Ruiz", "Actualización mayor: nuevas normas NOM-035", 30, 312_320, "Entrada en vigor de la NOM-035-STPS"),
+            new V("v2.1", "Carlos Ruiz", "Ajuste en sección 4.2 - Protocolo de emergencia", 5, 318_464, "Hallazgo del simulacro de evacuación"));
 
         Agregar(2, "FIN-PRE-002", "Presupuesto Anual 2026", TipoDocumento.Excel, "Finanzas", 60,
-            new V("v1.0", "C.P. Laura Méndez", "Presupuesto base aprobado por dirección", 60, 1520000),
-            new V("v1.1", "C.P. Laura Méndez", "Ajuste partida de tecnología Q3", 30, 1580000),
-            new V("v1.2", "Carlos Ruiz", "Incorporación de proyección de gastos operativos", 2, 1640000));
+            "Confidencial,Contabilidad",
+            new V("v1.0", "C.P. Laura Méndez", "Presupuesto base aprobado por dirección", 60, 1_556_480, "Cierre del ciclo de planeación anual"),
+            new V("v1.1", "C.P. Laura Méndez", "Ajuste partida de tecnología Q3", 30, 1_617_920, "Solicitud de TI por renovación de licencias"),
+            new V("v1.2", "Carlos Ruiz", "Incorporación de proyección de gastos operativos", 2, 1_679_360, "Petición del comité de finanzas"));
 
         Agregar(3, "DIR-EST-003", "Plan Estratégico 2026-2028", TipoDocumento.PowerPoint, "Dirección General", 15,
-            new V("v1.0", "Ing. Roberto Díaz", "Presentación inicial aprobada por comité", 15, 4200000));
+            "Urgente,Confidencial",
+            new V("v1.0", "Ing. Roberto Díaz", "Presentación inicial aprobada por comité", 15, 4_300_800, "Sesión del consejo directivo"));
 
         Agregar(4, "LEG-CON-004", "Contrato Marco Proveedores", TipoDocumento.PDF, "Legal", 200,
-            new V("v1.0", "Lic. Fernanda Torres", "Contrato base redactado por jurídico", 200, 890000),
-            new V("v1.1", "Lic. Fernanda Torres", "Adición de cláusula de confidencialidad", 150, 920000),
-            new V("v2.0", "Lic. Fernanda Torres", "Reestructuración completa - nuevo marco legal", 80, 1100000),
-            new V("v2.1", "Carlos Ruiz", "Actualización de montos y tarifas", 40, 1120000),
-            new V("v3.0", "Ing. Roberto Díaz", "Versión definitiva con firma electrónica", 10, 1250000));
+            "Oficial,Legal",
+            new V("v1.0", "Lic. Fernanda Torres", "Contrato base redactado por jurídico", 200, 911_360, "Alta del nuevo esquema de proveedores"),
+            new V("v1.1", "Lic. Fernanda Torres", "Adición de cláusula de confidencialidad", 150, 942_080, "Recomendación de auditoría legal"),
+            new V("v2.0", "Lic. Fernanda Torres", "Reestructuración completa - nuevo marco legal", 80, 1_126_400, "Reforma a la legislación de adquisiciones"),
+            new V("v2.1", "Carlos Ruiz", "Actualización de montos y tarifas", 40, 1_146_880, "Ajuste inflacionario anual"),
+            new V("v3.0", "Ing. Roberto Díaz", "Versión definitiva con firma electrónica", 10, 1_280_000, "Formalización y firma de las partes"));
 
         Agregar(5, "TI-MAN-005", "Manual de Operaciones TI", TipoDocumento.Word, "Tecnología", 45,
-            new V("v1.0", "Ing. Roberto Díaz", "Manual inicial de procedimientos de TI", 45, 520000),
-            new V("v1.1", "Carlos Ruiz", "Agregado procedimiento de respaldos y DR", 8, 580000));
+            "Interno",
+            new V("v1.0", "Ing. Roberto Díaz", "Manual inicial de procedimientos de TI", 45, 532_480, "Estandarización de procesos del área"),
+            new V("v1.1", "Carlos Ruiz", "Agregado procedimiento de respaldos y DR", 8, 593_920, "Plan de continuidad del negocio (DRP)"));
 
         Agregar(6, "CAL-AUD-006", "Informe de Auditoría Interna Q3", TipoDocumento.PDF, "Calidad", 7,
-            new V("v1.0", "Ana Gómez", "Informe de hallazgos de auditoría Q3-2026", 7, 2100000));
+            "Urgente,Auditoría",
+            new V("v1.0", "Ana Gómez", "Informe de hallazgos de auditoría Q3-2026", 7, 2_150_400, "Programa anual de auditorías ISO 9001"));
 
-        return (docs.ToArray(), vers.ToArray());
+        return (carpetas, docs.ToArray(), vers.ToArray());
     }
 
     private static string Hash(string input) =>
