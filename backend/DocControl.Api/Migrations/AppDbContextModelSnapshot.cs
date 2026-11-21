@@ -110,6 +110,79 @@ namespace DocControl.Api.Migrations
                         });
                 });
 
+            modelBuilder.Entity("DocControl.Api.Models.ComentarioDocumento", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Autor")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<int>("DocumentoId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("FechaCreacion")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("RolAutor")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<string>("Texto")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("VersionNumero")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DocumentoId", "FechaCreacion");
+
+                    b.ToTable("Comentarios");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            Autor = "Elena Martínez",
+                            DocumentoId = 1,
+                            FechaCreacion = new DateTime(2026, 10, 28, 12, 0, 0, 0, DateTimeKind.Utc),
+                            RolAutor = "Administrador",
+                            Texto = "@Carlos revisar el apartado 2 en la próxima actualización para incluir las nuevas rutas de evacuación.",
+                            VersionNumero = "v2.1"
+                        },
+                        new
+                        {
+                            Id = 2,
+                            Autor = "Roberto Díaz",
+                            DocumentoId = 2,
+                            FechaCreacion = new DateTime(2026, 10, 31, 12, 0, 0, 0, DateTimeKind.Utc),
+                            RolAutor = "Revisor",
+                            Texto = "@Elena las proyecciones de gastos operativos ya cuadran con el cierre contable. Listo para comité.",
+                            VersionNumero = "v1.2"
+                        },
+                        new
+                        {
+                            Id = 3,
+                            Autor = "Carlos Ruiz",
+                            DocumentoId = 4,
+                            FechaCreacion = new DateTime(2026, 10, 30, 12, 0, 0, 0, DateTimeKind.Utc),
+                            RolAutor = "Editor",
+                            Texto = "@Roberto @Elena confirmo que la cláusula de confidencialidad quedó reflejada en la versión vigente v3.0.",
+                            VersionNumero = "General"
+                        });
+                });
+
             modelBuilder.Entity("DocControl.Api.Models.Documento", b =>
                 {
                     b.Property<int>("Id")
@@ -134,6 +207,10 @@ namespace DocControl.Api.Migrations
 
                     b.Property<bool>("Eliminado")
                         .HasColumnType("bit");
+
+                    b.Property<string>("EliminadoPor")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
 
                     b.Property<string>("Estado")
                         .IsRequired()
@@ -209,7 +286,7 @@ namespace DocControl.Api.Migrations
                             Eliminado = false,
                             Estado = "Disponible",
                             EstadoRevision = "Aprobado",
-                            Etiquetas = "Oficial,Normativo",
+                            Etiquetas = "Oficial,Final",
                             FechaCreacion = new DateTime(2026, 7, 4, 12, 0, 0, 0, DateTimeKind.Utc),
                             FechaUltimaModificacion = new DateTime(2026, 10, 27, 12, 0, 0, 0, DateTimeKind.Utc),
                             Nombre = "Política de Seguridad e Higiene",
@@ -226,7 +303,7 @@ namespace DocControl.Api.Migrations
                             Eliminado = false,
                             Estado = "Disponible",
                             EstadoRevision = "Aprobado",
-                            Etiquetas = "Confidencial,Contabilidad",
+                            Etiquetas = "Urgente,Contabilidad",
                             FechaCreacion = new DateTime(2026, 9, 2, 12, 0, 0, 0, DateTimeKind.Utc),
                             FechaUltimaModificacion = new DateTime(2026, 10, 30, 12, 0, 0, 0, DateTimeKind.Utc),
                             Nombre = "Presupuesto Anual 2026",
@@ -260,7 +337,7 @@ namespace DocControl.Api.Migrations
                             Eliminado = false,
                             Estado = "Disponible",
                             EstadoRevision = "Aprobado",
-                            Etiquetas = "Oficial,Legal",
+                            Etiquetas = "Oficial,Final",
                             FechaCreacion = new DateTime(2026, 4, 15, 12, 0, 0, 0, DateTimeKind.Utc),
                             FechaUltimaModificacion = new DateTime(2026, 10, 22, 12, 0, 0, 0, DateTimeKind.Utc),
                             Nombre = "Contrato Marco Proveedores",
@@ -277,7 +354,7 @@ namespace DocControl.Api.Migrations
                             Eliminado = false,
                             Estado = "Disponible",
                             EstadoRevision = "Aprobado",
-                            Etiquetas = "Interno",
+                            Etiquetas = "En Proceso,Oficial",
                             FechaCreacion = new DateTime(2026, 9, 17, 12, 0, 0, 0, DateTimeKind.Utc),
                             FechaUltimaModificacion = new DateTime(2026, 10, 24, 12, 0, 0, 0, DateTimeKind.Utc),
                             Nombre = "Manual de Operaciones TI",
@@ -294,7 +371,7 @@ namespace DocControl.Api.Migrations
                             Eliminado = false,
                             Estado = "Disponible",
                             EstadoRevision = "Aprobado",
-                            Etiquetas = "Urgente,Auditoría",
+                            Etiquetas = "Urgente,Confidencial",
                             FechaCreacion = new DateTime(2026, 10, 25, 12, 0, 0, 0, DateTimeKind.Utc),
                             FechaUltimaModificacion = new DateTime(2026, 10, 25, 12, 0, 0, 0, DateTimeKind.Utc),
                             Nombre = "Informe de Auditoría Interna Q3",
@@ -302,6 +379,58 @@ namespace DocControl.Api.Migrations
                             Tipo = "PDF",
                             VersionActual = "v1.0"
                         });
+                });
+
+            modelBuilder.Entity("DocControl.Api.Models.EnlaceCompartido", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("CreadoPor")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<int>("DocumentoId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("FechaCreacion")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime>("FechaExpiracion")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("FechaRevocacion")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("PermiteDescarga")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("Revocado")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Token")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<int>("TotalAccesos")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("VersionId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DocumentoId");
+
+                    b.HasIndex("Token")
+                        .IsUnique();
+
+                    b.ToTable("EnlacesCompartidos");
                 });
 
             modelBuilder.Entity("DocControl.Api.Models.InfoBloqueo", b =>
@@ -337,6 +466,89 @@ namespace DocControl.Api.Migrations
                         .IsUnique();
 
                     b.ToTable("Bloqueos");
+                });
+
+            modelBuilder.Entity("DocControl.Api.Models.Notificacion", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("CodigoDocumento")
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<string>("Destinatario")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<int?>("DocumentoId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("FechaCreacion")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("Leida")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Mensaje")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
+
+                    b.Property<string>("RolDestinatario")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<string>("Tipo")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("nvarchar(40)");
+
+                    b.Property<string>("Titulo")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DocumentoId");
+
+                    b.HasIndex("RolDestinatario", "Leida", "FechaCreacion");
+
+                    b.ToTable("Notificaciones");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            CodigoDocumento = "POL-RH-001",
+                            Destinatario = "Carlos Ruiz",
+                            DocumentoId = 1,
+                            FechaCreacion = new DateTime(2026, 10, 28, 12, 0, 0, 0, DateTimeKind.Utc),
+                            Leida = false,
+                            Mensaje = "Elena Martínez te mencionó en 'Política de Seguridad e Higiene': \"@Carlos revisar el apartado 2 en la próxima actualización para incluir las nuevas rutas de evacuación.\"",
+                            RolDestinatario = "Editor",
+                            Tipo = "MENCION",
+                            Titulo = "Te mencionaron en POL-RH-001"
+                        },
+                        new
+                        {
+                            Id = 2,
+                            CodigoDocumento = "LEG-CON-004",
+                            Destinatario = "Roberto Díaz",
+                            DocumentoId = 4,
+                            FechaCreacion = new DateTime(2026, 10, 30, 12, 0, 0, 0, DateTimeKind.Utc),
+                            Leida = false,
+                            Mensaje = "Carlos Ruiz te mencionó en 'Contrato Marco Proveedores': \"@Roberto @Elena confirmo que la cláusula de confidencialidad quedó reflejada en la versión vigente v3.0.\"",
+                            RolDestinatario = "Revisor",
+                            Tipo = "MENCION",
+                            Titulo = "Te mencionaron en LEG-CON-004"
+                        });
                 });
 
             modelBuilder.Entity("DocControl.Api.Models.RegistroBitacora", b =>
@@ -395,6 +607,40 @@ namespace DocControl.Api.Migrations
                     b.HasIndex("FechaHora");
 
                     b.ToTable("Bitacora");
+                });
+
+            modelBuilder.Entity("DocControl.Api.Models.SuscripcionLiberacion", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("DocumentoId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("FechaSolicitud")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("Notificado")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Rol")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<string>("Usuario")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DocumentoId", "Notificado");
+
+                    b.ToTable("SuscripcionesLiberacion");
                 });
 
             modelBuilder.Entity("DocControl.Api.Models.VersionDocumento", b =>
@@ -684,11 +930,46 @@ namespace DocControl.Api.Migrations
                         });
                 });
 
+            modelBuilder.Entity("DocControl.Api.Models.ComentarioDocumento", b =>
+                {
+                    b.HasOne("DocControl.Api.Models.Documento", null)
+                        .WithMany("Comentarios")
+                        .HasForeignKey("DocumentoId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("DocControl.Api.Models.EnlaceCompartido", b =>
+                {
+                    b.HasOne("DocControl.Api.Models.Documento", null)
+                        .WithMany()
+                        .HasForeignKey("DocumentoId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("DocControl.Api.Models.InfoBloqueo", b =>
                 {
                     b.HasOne("DocControl.Api.Models.Documento", null)
                         .WithOne("Bloqueo")
                         .HasForeignKey("DocControl.Api.Models.InfoBloqueo", "DocumentoId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("DocControl.Api.Models.Notificacion", b =>
+                {
+                    b.HasOne("DocControl.Api.Models.Documento", null)
+                        .WithMany()
+                        .HasForeignKey("DocumentoId")
+                        .OnDelete(DeleteBehavior.SetNull);
+                });
+
+            modelBuilder.Entity("DocControl.Api.Models.SuscripcionLiberacion", b =>
+                {
+                    b.HasOne("DocControl.Api.Models.Documento", null)
+                        .WithMany()
+                        .HasForeignKey("DocumentoId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
@@ -705,6 +986,8 @@ namespace DocControl.Api.Migrations
             modelBuilder.Entity("DocControl.Api.Models.Documento", b =>
                 {
                     b.Navigation("Bloqueo");
+
+                    b.Navigation("Comentarios");
 
                     b.Navigation("HistorialVersiones");
                 });

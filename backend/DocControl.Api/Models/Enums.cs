@@ -6,7 +6,9 @@ public enum TipoDocumento
     Word,
     Excel,
     PowerPoint,
-    PDF
+    PDF,
+    Imagen,
+    Texto
 }
 
 /// <summary>Estado del documento en el flujo de trabajo (bloqueo de edición).</summary>
@@ -49,10 +51,16 @@ public enum AccionBitacora
     RESTAURAR_VERSION,
     RESTAURAR_PAPELERA,
     ELIMINACION_DEFINITIVA,
+    RENOMBRAR_DOCUMENTO,
     DESCARGA_ARCHIVO,
     ACCESO_DENEGADO,
     ACTUALIZACION_METADATOS,
     MOVIMIENTO_CARPETA,
     ALTA_CARPETA,
-    MODIFICACION_CARPETA
+    MODIFICACION_CARPETA,
+    ACTUALIZAR_ETIQUETAS,
+    AGREGAR_COMENTARIO,
+    CREAR_ENLACE_TEMPORAL,
+    REVOCAR_ENLACE_TEMPORAL,
+    ACCESO_ENLACE_EXTERNO
 }

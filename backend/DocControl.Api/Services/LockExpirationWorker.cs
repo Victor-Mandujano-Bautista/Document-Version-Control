@@ -78,6 +78,10 @@ public class LockExpirationWorker : BackgroundService
             doc.Bloqueo = null;
             doc.Estado = EstadoDocumento.Disponible;
 
+            // Notificar a usuarios en la lista de espera ("Avisarme cuando esté libre")
+            await NotificationService.NotifyLockReleasedAsync(
+                db, doc, "expiración automática del tiempo de edición", ct);
+
             // Registrar en la bitácora de auditoría
             db.Bitacora.Add(new RegistroBitacora
             {

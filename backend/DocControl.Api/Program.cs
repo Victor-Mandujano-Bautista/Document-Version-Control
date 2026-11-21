@@ -21,6 +21,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 // Servicio centinela: libera bloqueos expirados cada 30 segundos
 builder.Services.AddHostedService<LockExpirationWorker>();
+builder.Services.AddScoped<NotificationService>();
 
 var app = builder.Build();
 

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using DocControl.Api.Data;
 using DocControl.Api.Models;
+using DocControl.Api.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -18,13 +19,15 @@ public class DocumentsController : ControllerBase
     private static readonly string[] ColoresPermitidos = ["Rojo", "Amarillo", "Azul", "Verde", "Morado", "Cian"];
 
     private readonly AppDbContext _context;
+    private readonly string _contentRootPath;
     private readonly string _storagePath;
 
     public DocumentsController(AppDbContext context, IWebHostEnvironment env)
     {
         _context = context;
+        _contentRootPath = Path.GetFullPath(env.ContentRootPath);
         // Carpeta física "Storage" en la raíz del backend (junto a Program.cs)
-        _storagePath = Path.GetFullPath(Path.Combine(env.ContentRootPath, "Storage"));
+        _storagePath = Path.GetFullPath(Path.Combine(_contentRootPath, "Storage"));
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -40,12 +43,34 @@ public class DocumentsController : ControllerBase
     {
         await LiberarBloqueosExpiradosAsync();
 
-        var query = _context.Documentos.AsNoTracking().Include(d => d.Bloqueo).AsQueryable();
+        var query = _context.Documentos
+            .AsNoTracking()
+            .Include(d => d.Bloqueo)
+            .Include(d => d.HistorialVersiones)
+            .Include(d => d.Comentarios)
+            .AsQueryable();
         if (!incluirEliminados)
             query = query.Where(d => !d.Eliminado);
 
         var docs = await query.OrderBy(d => d.Id).ToListAsync();
-        return Ok(docs.Select(MapearAResumen).ToList());
+
+        var suscripciones = await _context.SuscripcionesLiberacion
+            .AsNoTracking()
+            .Where(s => !s.Notificado)
+            .ToListAsync();
+
+        var resultado = docs.Select(doc =>
+        {
+            var res = MapearAResumen(doc);
+            res.SuscriptoresLiberacion = suscripciones
+                .Where(s => s.DocumentoId == doc.Id)
+                .Select(s => s.Usuario)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            return res;
+        }).ToList();
+
+        return Ok(resultado);
     }
 
     /// <summary>Obtener únicamente los documentos de la papelera (RF-10).</summary>
@@ -54,6 +79,8 @@ public class DocumentsController : ControllerBase
     {
         var docs = await _context.Documentos
             .AsNoTracking()
+            .Include(d => d.HistorialVersiones)
+            .Include(d => d.Comentarios)
             .Where(d => d.Eliminado)
             .OrderByDescending(d => d.FechaEliminacion)
             .ToListAsync();
@@ -94,7 +121,28 @@ public class DocumentsController : ControllerBase
             .OrderByDescending(v => v.NumeroVersion)
             .ToListAsync();
 
-        return Ok(historial);
+        var resultado = historial.Select(v =>
+        {
+            bool tieneFisico = ResolverRutaArchivoFisico(v.RutaArchivo) != null;
+            return new
+            {
+                v.Id,
+                v.DocumentoId,
+                v.NumeroVersion,
+                v.VersionTexto,
+                v.NombreArchivo,
+                TieneArchivo = tieneFisico,
+                TieneArchivoFisico = tieneFisico,
+                v.Autor,
+                v.Comentario,
+                v.HashSHA256,
+                v.FechaCreacion,
+                v.TamanoBytes,
+                v.MotivoCambio
+            };
+        }).ToList();
+
+        return Ok(resultado);
     }
 
     /// <summary>Obtener la bitácora digital de auditoría.</summary>
@@ -512,11 +560,11 @@ public class DocumentsController : ControllerBase
         if (doc.Bloqueo.UsuarioBloqueador != usuario)
             return Denegado($"Solo el usuario '{doc.Bloqueo.UsuarioBloqueador}' (dueño del bloqueo) puede hacer check-in.");
 
-        // El archivo debe corresponder al tipo del documento (.docx, .xlsx, .pptx, .pdf)
+        // El archivo debe corresponder al tipo del documento (.docx, .xlsx, .pptx, .pdf, imágenes o .txt)
         string nombreSeguro = SanitizarNombre(file.FileName);
-        string extensionEsperada = ExtensionPorTipo(doc.Tipo);
-        if (!string.Equals(Path.GetExtension(nombreSeguro), extensionEsperada, StringComparison.OrdinalIgnoreCase))
-            return Denegado($"El archivo debe ser de tipo '{extensionEsperada}' para un documento {doc.Tipo}.");
+        string extSubida = Path.GetExtension(nombreSeguro);
+        if (!ExtensionPermitidaParaTipo(doc.Tipo, extSubida))
+            return Denegado($"El archivo debe ser de tipo '{DescripcionExtensionesPorTipo(doc.Tipo)}' para un documento {doc.Tipo}.");
 
         // Documento creado sin archivo inicial: el primer check-in genera la v1.0
         string nuevaVersion = doc.HistorialVersiones.Count == 0
@@ -553,8 +601,9 @@ public class DocumentsController : ControllerBase
             doc.NumeroVersionActual = siguienteNumero;
             doc.FechaUltimaModificacion = ahora;
 
-            // Liberar bloqueo automáticamente
+            // Liberar bloqueo automáticamente y notificar a usuarios en lista de espera
             LiberarDocumento(doc);
+            await NotificationService.NotifyLockReleasedAsync(_context, doc, $"nueva versión {nuevaVersion} subida por {usuario}");
 
             string observaciones = $"Nueva versión {nuevaVersion} subida. Archivo: {nombreSeguro} ({file.Length} bytes). " +
                                    $"Qué se hizo: {comentarios}.";
@@ -599,17 +648,19 @@ public class DocumentsController : ControllerBase
         if (string.IsNullOrEmpty(version.RutaArchivo))
             return NotFound(new RespuestaError { Error = "Sin archivo", Detalle = "Esta versión no tiene un archivo físico asociado (dato de prueba inicial)." });
 
-        // Protección contra path traversal: la ruta resuelta debe quedar dentro de /Storage
-        string? rutaCompleta = ResolverRutaSegura(version.RutaArchivo);
+        // Resolución robusta dentro de /Storage o ContentRoot
+        string? rutaCompleta = ResolverRutaArchivoFisico(version.RutaArchivo);
         if (rutaCompleta == null)
-            return BadRequest(new RespuestaError { Error = "Ruta inválida", Detalle = "La ruta del archivo no es válida." });
-
-        if (!System.IO.File.Exists(rutaCompleta))
             return NotFound(new RespuestaError { Error = "Archivo no disponible", Detalle = "El archivo físico no se encuentra en el almacenamiento del servidor." });
 
-        // Auditoría de descarga (si no se informa identidad se registra como anónimo con rol de solo lectura)
-        var rolDescarga = TryParseRol(rol, out var r) ? r : RolUsuario.Lector;
-        string usuarioDescarga = string.IsNullOrWhiteSpace(usuario) ? "Anónimo" : usuario.Trim();
+        // Auditoría de descarga (admite query o headers X-Usuario / X-Rol)
+        string? usuarioHeader = Request.Headers["X-Usuario"].FirstOrDefault();
+        string? rolHeader = Request.Headers["X-Rol"].FirstOrDefault();
+        string? usuarioFinal = !string.IsNullOrWhiteSpace(usuario) ? usuario : usuarioHeader;
+        string? rolFinal = !string.IsNullOrWhiteSpace(rol) ? rol : rolHeader;
+
+        var rolDescarga = TryParseRol(rolFinal, out var r) ? r : RolUsuario.Lector;
+        string usuarioDescarga = string.IsNullOrWhiteSpace(usuarioFinal) ? "Anónimo" : usuarioFinal.Trim();
         RegistrarEnBitacora(usuarioDescarga, rolDescarga, doc.Codigo, doc.Nombre, version.VersionTexto,
             AccionBitacora.DESCARGA_ARCHIVO,
             $"Descarga de la versión {version.VersionTexto}. Archivo: {version.NombreArchivo} ({version.TamanoBytes} bytes).");
@@ -617,6 +668,186 @@ public class DocumentsController : ControllerBase
 
         var stream = new FileStream(rutaCompleta, FileMode.Open, FileAccess.Read, FileShare.Read);
         return File(stream, ObtenerMimeType(Path.GetExtension(rutaCompleta)), version.NombreArchivo, enableRangeProcessing: true);
+    }
+
+    /// <summary>
+    /// Vista previa inline en el navegador para PDF, imágenes y texto (RF-18).
+    /// Devuelve Content-Disposition: inline sin forzar descarga.
+    /// </summary>
+    [HttpGet("{id:int}/preview")]
+    public async Task<IActionResult> VistaPrevia(int id, [FromQuery] int? versionId)
+    {
+        var doc = await _context.Documentos.AsNoTracking().FirstOrDefaultAsync(d => d.Id == id);
+        if (doc == null) return NoEncontrado(id);
+
+        VersionDocumento? version;
+        if (versionId.HasValue)
+        {
+            version = await _context.Versiones
+                .AsNoTracking()
+                .FirstOrDefaultAsync(v => v.Id == versionId.Value && v.DocumentoId == id);
+        }
+        else
+        {
+            version = await _context.Versiones
+                .AsNoTracking()
+                .Where(v => v.DocumentoId == id)
+                .OrderByDescending(v => v.NumeroVersion)
+                .FirstOrDefaultAsync();
+        }
+
+        if (version == null)
+            return NotFound(new RespuestaError { Error = "No encontrado", Detalle = "No se encontró una versión disponible para vista previa." });
+
+        if (string.IsNullOrEmpty(version.RutaArchivo))
+            return NotFound(new RespuestaError { Error = "Sin archivo", Detalle = "Esta versión no tiene un archivo físico asociado (dato de prueba inicial)." });
+
+        string? rutaCompleta = ResolverRutaArchivoFisico(version.RutaArchivo);
+        if (rutaCompleta == null)
+            return NotFound(new RespuestaError { Error = "Archivo no disponible", Detalle = "El archivo físico no se encuentra en el almacenamiento del servidor." });
+
+        string ext = Path.GetExtension(rutaCompleta);
+        if (string.IsNullOrEmpty(ext))
+            ext = Path.GetExtension(version.NombreArchivo);
+        string mime = ObtenerMimeType(ext);
+
+        // Encabezado Content-Disposition seguro (solo ASCII en filename + RFC 5987 UTF-8) para evitar error 500 de Kestrel con acentos
+        string nombreLimpio = SanitizarNombre(version.NombreArchivo).Replace("\"", string.Empty);
+        string nombreAscii = new string(QuitarAcentos(nombreLimpio).Where(c => c >= 32 && c <= 126).ToArray());
+        if (string.IsNullOrWhiteSpace(nombreAscii)) nombreAscii = $"documento{ext}";
+
+        Response.Headers.Remove("X-Frame-Options");
+        Response.Headers["Content-Disposition"] = $"inline; filename=\"{nombreAscii}\"; filename*=UTF-8''{Uri.EscapeDataString(nombreLimpio)}";
+        var stream = new FileStream(rutaCompleta, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return File(stream, mime, enableRangeProcessing: true);
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  ETIQUETAS (RF-14) Y COMENTARIOS CON MENCIONES (RF-15)
+    // ═══════════════════════════════════════════════════════════
+
+    /// <summary>Actualizar etiquetas de un documento (Permitido para Administrador, Revisor y Editor - RF-14).</summary>
+    [HttpPut("{id:int}/tags")]
+    public async Task<IActionResult> ActualizarEtiquetas(int id, [FromBody] SolicitudActualizarEtiquetas solicitud)
+    {
+        if (!TryParseRol(solicitud.Rol, out var rol))
+            return RolInvalido(solicitud.Rol);
+
+        if (rol != RolUsuario.Administrador && rol != RolUsuario.Revisor && rol != RolUsuario.Editor)
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, "actualizar etiquetas (no permitido para Lector)");
+
+        if (string.IsNullOrWhiteSpace(solicitud.Usuario))
+            return Denegado("El usuario es obligatorio.");
+
+        var doc = await _context.Documentos
+            .Include(d => d.Bloqueo)
+            .Include(d => d.HistorialVersiones)
+            .Include(d => d.Comentarios)
+            .FirstOrDefaultAsync(d => d.Id == id);
+        if (doc == null) return NoEncontrado(id);
+        if (doc.Eliminado) return EnPapelera(doc);
+
+        string normalizadas = NormalizarEtiquetas(solicitud.Etiquetas);
+        if (normalizadas.Length > MaxLongitudEtiquetas)
+            return Denegado($"Las etiquetas no pueden exceder {MaxLongitudEtiquetas} caracteres en total.");
+
+        string anteriores = doc.Etiquetas;
+        doc.Etiquetas = normalizadas;
+        doc.FechaUltimaModificacion = DateTime.UtcNow;
+
+        RegistrarEnBitacora(solicitud.Usuario.Trim(), rol, doc, AccionBitacora.ACTUALIZAR_ETIQUETAS,
+            $"Etiquetas actualizadas: '{(string.IsNullOrEmpty(anteriores) ? "(ninguna)" : anteriores)}' → '{(string.IsNullOrEmpty(normalizadas) ? "(ninguna)" : normalizadas)}'.");
+
+        try
+        {
+            await _context.SaveChangesAsync();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return Conflicto409Concurrencia();
+        }
+
+        return Ok(new
+        {
+            mensaje = $"Etiquetas de '{doc.Codigo}' actualizadas correctamente.",
+            etiquetas = SepararEtiquetas(doc.Etiquetas),
+            documento = MapearAResumen(doc)
+        });
+    }
+
+    /// <summary>Listar comentarios de un documento ordenados cronológicamente (tipo chat - RF-15).</summary>
+    [HttpGet("{id:int}/comments")]
+    public async Task<IActionResult> ObtenerComentarios(int id)
+    {
+        if (!await _context.Documentos.AnyAsync(d => d.Id == id))
+            return NoEncontrado(id);
+
+        var comentarios = await _context.Comentarios
+            .AsNoTracking()
+            .Where(c => c.DocumentoId == id)
+            .OrderBy(c => c.FechaCreacion)
+            .ThenBy(c => c.Id)
+            .ToListAsync();
+
+        return Ok(comentarios);
+    }
+
+    /// <summary>Agregar comentario por archivo o versión específica con menciones (Permitido para Admin, Revisor y Editor - RF-15).</summary>
+    [HttpPost("{id:int}/comments")]
+    public async Task<IActionResult> AgregarComentario(int id, [FromBody] SolicitudAgregarComentario solicitud)
+    {
+        if (!TryParseRol(solicitud.RolAutor, out var rol))
+            return RolInvalido(solicitud.RolAutor);
+
+        if (rol != RolUsuario.Administrador && rol != RolUsuario.Revisor && rol != RolUsuario.Editor)
+            return await DenegarAccesoAsync(solicitud.Autor, rol, id, "publicar comentarios (solo lectura para Lector)");
+
+        if (string.IsNullOrWhiteSpace(solicitud.Autor))
+            return Denegado("El autor del comentario es obligatorio.");
+
+        var texto = solicitud.Texto?.Trim() ?? string.Empty;
+        if (texto.Length == 0)
+            return Denegado("El texto del comentario no puede estar vacío.");
+        if (texto.Length > 2000)
+            return Denegado("El comentario no puede exceder 2000 caracteres.");
+
+        var doc = await _context.Documentos.FirstOrDefaultAsync(d => d.Id == id);
+        if (doc == null) return NoEncontrado(id);
+        if (doc.Eliminado) return EnPapelera(doc);
+
+        string versionNumero = string.IsNullOrWhiteSpace(solicitud.VersionNumero)
+            ? "General"
+            : solicitud.VersionNumero.Trim();
+        if (versionNumero.Length > 30)
+            versionNumero = versionNumero[..30];
+
+        var comentario = new ComentarioDocumento
+        {
+            DocumentoId = id,
+            VersionNumero = versionNumero,
+            Autor = solicitud.Autor.Trim(),
+            RolAutor = rol.ToString(),
+            Texto = texto,
+            FechaCreacion = DateTime.UtcNow
+        };
+
+        _context.Comentarios.Add(comentario);
+
+        // Notificar EXCLUSIVAMENTE a los usuarios mencionados con @Nombre
+        NotificationService.NotificarMencionesEnComentario(
+            _context, doc, comentario.Autor, comentario.RolAutor, texto);
+        RegistrarEnBitacora(comentario.Autor, rol, doc.Codigo, doc.Nombre,
+            versionNumero == "General" ? doc.VersionActual : versionNumero,
+            AccionBitacora.AGREGAR_COMENTARIO,
+            $"Comentario en [{versionNumero}]: {(texto.Length > 180 ? texto[..180] + "..." : texto)}");
+
+        await _context.SaveChangesAsync();
+
+        return Ok(new
+        {
+            mensaje = "Comentario publicado correctamente.",
+            comentario
+        });
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -815,6 +1046,63 @@ public class DocumentsController : ControllerBase
     }
 
     /// <summary>
+    /// Renombrar un documento (RF-03). Permitido para Administrador y Editor,
+    /// siempre que el archivo no esté eliminado ni bloqueado por otro usuario.
+    /// </summary>
+    [HttpPut("{id:int}/rename")]
+    public async Task<IActionResult> RenombrarDocumento(int id, [FromBody] SolicitudRenombrarDocumento solicitud)
+    {
+        if (!TryParseRol(solicitud.Rol, out var rol))
+            return RolInvalido(solicitud.Rol);
+
+        if (rol != RolUsuario.Editor && rol != RolUsuario.Administrador)
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, "renombrar documentos (solo Administrador o Editor)");
+
+        if (string.IsNullOrWhiteSpace(solicitud.Usuario))
+            return Denegado("El usuario es obligatorio.");
+
+        var nuevoNombre = solicitud.Nombre?.Trim() ?? string.Empty;
+        if (nuevoNombre.Length == 0)
+            return Denegado("El nuevo nombre del documento es obligatorio.");
+        if (nuevoNombre.Length > 200)
+            return Denegado("El nombre del documento no puede exceder 200 caracteres.");
+
+        await LiberarBloqueosExpiradosAsync();
+
+        var doc = await CargarDocumentoAsync(id);
+        if (doc == null) return NoEncontrado(id);
+        if (doc.Eliminado) return EnPapelera(doc);
+
+        if (doc.Bloqueo != null && doc.Bloqueo.UsuarioBloqueador != solicitud.Usuario)
+            return Conflicto(doc);
+
+        if (string.Equals(doc.Nombre, nuevoNombre, StringComparison.Ordinal))
+            return Denegado("El nombre nuevo es idéntico al nombre actual.");
+
+        string nombreAnterior = doc.Nombre;
+        doc.Nombre = nuevoNombre;
+        doc.FechaUltimaModificacion = DateTime.UtcNow;
+
+        RegistrarEnBitacora(solicitud.Usuario.Trim(), rol, doc, AccionBitacora.RENOMBRAR_DOCUMENTO,
+            $"Documento renombrado: '{nombreAnterior}' → '{nuevoNombre}'.");
+
+        try
+        {
+            await _context.SaveChangesAsync();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return Conflicto409Concurrencia();
+        }
+
+        return Ok(new
+        {
+            mensaje = $"Documento '{doc.Codigo}' renombrado a '{nuevoNombre}'.",
+            documento = MapearAResumen(doc)
+        });
+    }
+
+    /// <summary>
     /// Mover un archivo entre carpetas o subcarpetas existentes (Permitido para Administrador, Revisor y Editor,
     /// siempre que el archivo no esté bloqueado por otro usuario).
     /// </summary>
@@ -944,7 +1232,7 @@ public class DocumentsController : ControllerBase
         string extensionArchivo = Path.GetExtension(nombreSeguro);
         var tipoDetectado = DetectarTipoPorExtension(extensionArchivo);
         if (tipoDetectado == null)
-            return Denegado("Formato de archivo no soportado. Solo se permiten archivos Word (.docx), Excel (.xlsx), PowerPoint (.pptx) o PDF (.pdf).");
+            return Denegado("Formato de archivo no soportado. Permitidos: Word (.docx), Excel (.xlsx), PowerPoint (.pptx), PDF (.pdf), Imágenes (.png, .jpg, .jpeg, .webp) o Texto (.txt).");
 
         TipoDocumento tipoDoc = tipoDetectado.Value;
 
@@ -1083,6 +1371,7 @@ public class DocumentsController : ControllerBase
 
             doc.Eliminado = true;
             doc.FechaEliminacion = DateTime.UtcNow;
+            doc.EliminadoPor = usuario.Trim();
             RegistrarEnBitacora(usuario, rolParseado, doc, AccionBitacora.BAJA_DOCUMENTO, obsPapelera);
 
             try
@@ -1130,15 +1419,12 @@ public class DocumentsController : ControllerBase
         return Ok(new { mensaje = $"Documento '{doc.Codigo}' eliminado definitivamente." });
     }
 
-    /// <summary>Restaurar un documento desde la papelera (solo Administrador).</summary>
-    [HttpPost("{id}/restore")]
+    /// <summary>Restaurar un documento desde la papelera (permitido para cualquier rol autenticado - RF-10).</summary>
+    [HttpPost("{id:int}/restore")]
     public async Task<IActionResult> RestaurarDePapelera(int id, [FromBody] SolicitudUsuario solicitud)
     {
         if (!TryParseRol(solicitud.Rol, out var rol))
             return RolInvalido(solicitud.Rol);
-
-        if (rol != RolUsuario.Administrador)
-            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, "restaurar documentos de la papelera (solo Administrador)");
 
         if (string.IsNullOrWhiteSpace(solicitud.Usuario))
             return Denegado("El usuario es obligatorio.");
@@ -1152,8 +1438,9 @@ public class DocumentsController : ControllerBase
         var fechaEliminacion = doc.FechaEliminacion;
         doc.Eliminado = false;
         doc.FechaEliminacion = null;
+        doc.EliminadoPor = null;
 
-        RegistrarEnBitacora(solicitud.Usuario, rol, doc, AccionBitacora.RESTAURAR_PAPELERA,
+        RegistrarEnBitacora(solicitud.Usuario.Trim(), rol, doc, AccionBitacora.RESTAURAR_PAPELERA,
             $"Documento restaurado desde la papelera (enviado el {fechaEliminacion:dd/MM/yyyy HH:mm:ss} UTC).");
 
         try
@@ -1206,6 +1493,7 @@ public class DocumentsController : ControllerBase
 
         RegistrarEnBitacora(solicitud.Usuario, rol, doc, AccionBitacora.SOLICITUD_REVISION,
             $"Revisión solicitada para la versión {doc.VersionActual}.");
+        NotificationService.NotificarSolicitudRevision(_context, doc, solicitud.Usuario, rol);
 
         try
         {
@@ -1248,6 +1536,7 @@ public class DocumentsController : ControllerBase
         RegistrarEnBitacora(solicitud.Usuario, rol, doc,
             solicitud.Aprobar ? AccionBitacora.REVISION_APROBADA : AccionBitacora.REVISION_RECHAZADA,
             $"Revisión {resultado} para la versión {doc.VersionActual}. Dictamen: {comentario}");
+        NotificationService.NotificarDictamenRevision(_context, doc, solicitud.Usuario, solicitud.Aprobar, comentario);
 
         try
         {
@@ -1286,6 +1575,7 @@ public class DocumentsController : ControllerBase
 
         string usuarioAnterior = doc.Bloqueo.UsuarioBloqueador;
         LiberarDocumento(doc);
+        await NotificationService.NotifyLockReleasedAsync(_context, doc, $"liberación administrativa por {solicitud.Usuario}");
 
         RegistrarEnBitacora(solicitud.Usuario, rol, doc, AccionBitacora.DESBLOQUEO_FORZADO,
             $"Desbloqueo forzado ejecutado. Usuario afectado: {usuarioAnterior}. Motivo: {solicitud.Motivo}");
@@ -1293,6 +1583,86 @@ public class DocumentsController : ControllerBase
         await _context.SaveChangesAsync();
 
         return Ok(new { mensaje = $"Desbloqueo forzado exitoso. Se liberó el bloqueo de '{usuarioAnterior}'." });
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  LISTA DE ESPERA DE BLOQUEO ("AVISARME CUANDO ESTÉ LIBRE")
+    // ═══════════════════════════════════════════════════════════
+
+    /// <summary>Suscribir al usuario para recibir una notificación cuando el documento quede libre (RF-17).</summary>
+    [HttpPost("{id:int}/watch-unlock")]
+    public async Task<IActionResult> SuscribirLiberacion(int id, [FromBody] SolicitudUsuario solicitud)
+    {
+        if (!TryParseRol(solicitud.Rol, out var rol))
+            return RolInvalido(solicitud.Rol);
+
+        if (rol != RolUsuario.Administrador && rol != RolUsuario.Revisor && rol != RolUsuario.Editor)
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, "activar aviso de liberación de archivo (no permitido para Lector)");
+
+        if (string.IsNullOrWhiteSpace(solicitud.Usuario))
+            return Denegado("El usuario es obligatorio.");
+
+        var doc = await CargarDocumentoAsync(id);
+        if (doc == null) return NoEncontrado(id);
+        if (doc.Eliminado) return EnPapelera(doc);
+
+        if (doc.Estado != EstadoDocumento.Bloqueado || doc.Bloqueo == null)
+            return Denegado("El documento ya se encuentra disponible; no requiere aviso de liberación.");
+
+        string usuarioLimpio = solicitud.Usuario.Trim();
+        if (string.Equals(doc.Bloqueo.UsuarioBloqueador, usuarioLimpio, StringComparison.OrdinalIgnoreCase))
+            return Denegado("Usted mismo tiene bloqueado este documento actualmente.");
+
+        var existentes = await _context.SuscripcionesLiberacion
+            .Where(s => s.DocumentoId == id && !s.Notificado)
+            .ToListAsync();
+
+        bool yaSuscrito = existentes.Any(s =>
+            NotificationService.CoincideConSesion(s.Usuario, s.Rol, usuarioLimpio, rol.ToString()));
+
+        if (!yaSuscrito)
+        {
+            _context.SuscripcionesLiberacion.Add(new SuscripcionLiberacion
+            {
+                DocumentoId = id,
+                Usuario = usuarioLimpio,
+                Rol = rol.ToString(),
+                FechaSolicitud = DateTime.UtcNow,
+                Notificado = false
+            });
+            await _context.SaveChangesAsync();
+        }
+
+        return Ok(new
+        {
+            mensaje = "Te avisaremos en cuanto este archivo quede disponible.",
+            suscrito = true
+        });
+    }
+
+    /// <summary>Cancelar la suscripción de aviso de liberación sobre un documento bloqueado.</summary>
+    [HttpDelete("{id:int}/watch-unlock")]
+    public async Task<IActionResult> CancelarSuscripcionLiberacion(int id, [FromQuery] string? usuario, [FromQuery] string? rol)
+    {
+        var pendientes = await _context.SuscripcionesLiberacion
+            .Where(s => s.DocumentoId == id && !s.Notificado)
+            .ToListAsync();
+
+        var aEliminar = pendientes
+            .Where(s => NotificationService.CoincideConSesion(s.Usuario, s.Rol, usuario, rol))
+            .ToList();
+
+        if (aEliminar.Count > 0)
+        {
+            _context.SuscripcionesLiberacion.RemoveRange(aEliminar);
+            await _context.SaveChangesAsync();
+        }
+
+        return Ok(new
+        {
+            mensaje = "Aviso de liberación cancelado.",
+            suscrito = false
+        });
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -1347,7 +1717,10 @@ public class DocumentsController : ControllerBase
         if (vencidos.Count == 0) return;
 
         foreach (var doc in vencidos)
+        {
             LiberarPorExpiracion(doc);
+            await NotificationService.NotifyLockReleasedAsync(_context, doc, "expiración automática del tiempo de edición");
+        }
 
         await _context.SaveChangesAsync();
     }
@@ -1492,6 +1865,41 @@ public class DocumentsController : ControllerBase
             : null;
     }
 
+    /// <summary>
+    /// Resuelve de forma robusta la ruta física existente de un archivo guardado:
+    /// 1) Directa en Storage, 2) Ruta directa si existe, 3) Relativa a ContentRootPath, 4) Storage + FileName.
+    /// </summary>
+    private string? ResolverRutaArchivoFisico(string? rutaArchivo)
+    {
+        if (string.IsNullOrWhiteSpace(rutaArchivo)) return null;
+
+        // 1. Directa dentro de /Storage
+        string? enStorage = ResolverRutaSegura(rutaArchivo);
+        if (enStorage != null && System.IO.File.Exists(enStorage))
+            return enStorage;
+
+        // 2. Ruta directa tal como está guardada (si es absoluta o relativa al directorio actual)
+        if (System.IO.File.Exists(rutaArchivo))
+            return Path.GetFullPath(rutaArchivo);
+
+        // 3. Relativa al ContentRootPath del backend
+        string relativaRoot = Path.GetFullPath(Path.Combine(_contentRootPath, rutaArchivo));
+        if (relativaRoot.StartsWith(_contentRootPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            && System.IO.File.Exists(relativaRoot))
+            return relativaRoot;
+
+        // 4. Fallback seguro: Storage + nombre de archivo
+        string soloNombre = Path.GetFileName(rutaArchivo);
+        if (!string.IsNullOrWhiteSpace(soloNombre))
+        {
+            string? fallbackStorage = ResolverRutaSegura(soloNombre);
+            if (fallbackStorage != null && System.IO.File.Exists(fallbackStorage))
+                return fallbackStorage;
+        }
+
+        return null;
+    }
+
     /// <summary>Borra un archivo de /Storage sin lanzar excepciones (con protección contra path traversal).</summary>
     private void BorrarArchivoFisico(string? nombreAlmacenado)
     {
@@ -1538,11 +1946,29 @@ public class DocumentsController : ControllerBase
         return limpio;
     }
 
-    private static string ExtensionPorTipo(TipoDocumento tipo) => tipo switch
+    private static bool ExtensionPermitidaParaTipo(TipoDocumento tipo, string extension)
+    {
+        var ext = extension.ToLowerInvariant();
+        return tipo switch
+        {
+            TipoDocumento.Word => ext == ".docx",
+            TipoDocumento.Excel => ext == ".xlsx",
+            TipoDocumento.PowerPoint => ext == ".pptx",
+            TipoDocumento.PDF => ext == ".pdf",
+            TipoDocumento.Imagen => ext is ".png" or ".jpg" or ".jpeg" or ".webp",
+            TipoDocumento.Texto => ext == ".txt",
+            _ => false
+        };
+    }
+
+    private static string DescripcionExtensionesPorTipo(TipoDocumento tipo) => tipo switch
     {
         TipoDocumento.Word => ".docx",
         TipoDocumento.Excel => ".xlsx",
         TipoDocumento.PowerPoint => ".pptx",
+        TipoDocumento.PDF => ".pdf",
+        TipoDocumento.Imagen => ".png, .jpg, .jpeg, .webp",
+        TipoDocumento.Texto => ".txt",
         _ => ".pdf"
     };
 
@@ -1552,6 +1978,8 @@ public class DocumentsController : ControllerBase
         ".xlsx" => TipoDocumento.Excel,
         ".pptx" => TipoDocumento.PowerPoint,
         ".pdf" => TipoDocumento.PDF,
+        ".png" or ".jpg" or ".jpeg" or ".webp" => TipoDocumento.Imagen,
+        ".txt" => TipoDocumento.Texto,
         _ => null
     };
 
@@ -1633,6 +2061,10 @@ public class DocumentsController : ControllerBase
         ".xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ".pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         ".pdf" => "application/pdf",
+        ".png" => "image/png",
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".webp" => "image/webp",
+        ".txt" => "text/plain; charset=utf-8",
         _ => "application/octet-stream"
     };
 
@@ -1667,33 +2099,46 @@ public class DocumentsController : ControllerBase
         return string.Join(" / ", segmentos);
     }
 
-    private static DocumentoResumen MapearAResumen(Documento doc) => new()
+    private DocumentoResumen MapearAResumen(Documento doc)
     {
-        Id = doc.Id,
-        Codigo = doc.Codigo,
-        Nombre = doc.Nombre,
-        Tipo = doc.Tipo.ToString(),
-        Departamento = doc.Departamento,
-        CarpetaId = doc.CarpetaId,
-        VersionActual = doc.VersionActual,
-        Estado = doc.Estado.ToString(),
-        EstadoRevision = doc.EstadoRevision.ToString(),
-        RevisadoPor = doc.RevisadoPor,
-        ComentarioRevision = doc.ComentarioRevision,
-        Bloqueo = doc.Bloqueo != null ? new BloqueoResumen
+        var ultimaVersion = doc.HistorialVersiones
+            .OrderByDescending(v => v.NumeroVersion)
+            .FirstOrDefault();
+
+        return new DocumentoResumen
         {
-            Usuario = doc.Bloqueo.UsuarioBloqueador,
-            Rol = doc.Bloqueo.RolBloqueador.ToString(),
-            FechaBloqueo = doc.Bloqueo.FechaBloqueo,
-            FechaExpiracion = doc.Bloqueo.FechaExpiracion,
-            Expirado = doc.Bloqueo.EstaExpirado
-        } : null,
-        FechaCreacion = doc.FechaCreacion,
-        FechaUltimaModificacion = doc.FechaUltimaModificacion,
-        Eliminado = doc.Eliminado,
-        FechaEliminacion = doc.FechaEliminacion,
-        Etiquetas = SepararEtiquetas(doc.Etiquetas)
-    };
+            Id = doc.Id,
+            Codigo = doc.Codigo,
+            Nombre = doc.Nombre,
+            Tipo = doc.Tipo.ToString(),
+            Departamento = doc.Departamento,
+            CarpetaId = doc.CarpetaId,
+            VersionActual = doc.VersionActual,
+            Estado = doc.Estado.ToString(),
+            EstadoRevision = doc.EstadoRevision.ToString(),
+            RevisadoPor = doc.RevisadoPor,
+            ComentarioRevision = doc.ComentarioRevision,
+            Bloqueo = doc.Bloqueo != null ? new BloqueoResumen
+            {
+                Usuario = doc.Bloqueo.UsuarioBloqueador,
+                Rol = doc.Bloqueo.RolBloqueador.ToString(),
+                FechaBloqueo = doc.Bloqueo.FechaBloqueo,
+                FechaExpiracion = doc.Bloqueo.FechaExpiracion,
+                Expirado = doc.Bloqueo.EstaExpirado
+            } : null,
+            FechaCreacion = doc.FechaCreacion,
+            FechaUltimaModificacion = doc.FechaUltimaModificacion,
+            Eliminado = doc.Eliminado,
+            FechaEliminacion = doc.FechaEliminacion,
+            EliminadoPor = doc.EliminadoPor,
+            Autor = ultimaVersion?.Autor ?? string.Empty,
+            TamanoBytes = ultimaVersion?.TamanoBytes ?? 0,
+            FechaUltimaVersion = ultimaVersion?.FechaCreacion ?? doc.FechaUltimaModificacion,
+            TieneArchivoFisico = ResolverRutaArchivoFisico(ultimaVersion?.RutaArchivo) != null,
+            Etiquetas = SepararEtiquetas(doc.Etiquetas),
+            TotalComentarios = doc.Comentarios.Count
+        };
+    }
 
     private NotFoundObjectResult NoEncontrado(int id) =>
         NotFound(new RespuestaError { Error = "No encontrado", Detalle = $"Documento con Id {id} no existe." });

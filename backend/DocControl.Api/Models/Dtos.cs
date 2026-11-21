@@ -90,6 +90,73 @@ public class SolicitudActualizarCarpeta
     public string Rol { get; set; } = string.Empty;
 }
 
+/// <summary>Crear un enlace compartido temporal de solo lectura (RF-20).</summary>
+public class SolicitudCrearEnlaceCompartido
+{
+    public int? DuracionHoras { get; set; }
+    public string? FechaExpiracionPersonalizada { get; set; }
+    public bool PermiteDescarga { get; set; } = true;
+    public string Usuario { get; set; } = string.Empty;
+    public string Rol { get; set; } = string.Empty;
+}
+
+/// <summary>Resumen de enlace compartido para la tabla de gestión (RF-20).</summary>
+public class EnlaceCompartidoResumen
+{
+    public int Id { get; set; }
+    public int DocumentoId { get; set; }
+    public string Token { get; set; } = string.Empty;
+    public string CreadoPor { get; set; } = string.Empty;
+    public DateTime FechaCreacion { get; set; }
+    public DateTime FechaExpiracion { get; set; }
+    public bool Revocado { get; set; }
+    public DateTime? FechaRevocacion { get; set; }
+    public bool PermiteDescarga { get; set; }
+    public int TotalAccesos { get; set; }
+    public string Estado { get; set; } = string.Empty;
+}
+
+/// <summary>DTO seguro de solo lectura para la vista pública externa /share/:token (RF-20).</summary>
+public class DocumentoCompartidoPublicoDto
+{
+    public string Codigo { get; set; } = string.Empty;
+    public string Nombre { get; set; } = string.Empty;
+    public string Tipo { get; set; } = string.Empty;
+    public string VersionActual { get; set; } = string.Empty;
+    public long TamanoBytes { get; set; }
+    public string HashSha256 { get; set; } = string.Empty;
+    public DateTime FechaSubida { get; set; }
+    public DateTime FechaExpiracion { get; set; }
+    public bool PermiteDescarga { get; set; }
+    public bool TieneArchivoFisico { get; set; }
+    public string NombreArchivo { get; set; } = string.Empty;
+}
+
+/// <summary>Actualizar etiquetas de un documento (RF-14, Administrador, Revisor o Editor).</summary>
+public class SolicitudActualizarEtiquetas
+{
+    public string Etiquetas { get; set; } = string.Empty;
+    public string Usuario { get; set; } = string.Empty;
+    public string Rol { get; set; } = string.Empty;
+}
+
+/// <summary>Agregar un comentario por archivo o versión específica con menciones (RF-15).</summary>
+public class SolicitudAgregarComentario
+{
+    public string Texto { get; set; } = string.Empty;
+    public string? VersionNumero { get; set; }
+    public string Autor { get; set; } = string.Empty;
+    public string RolAutor { get; set; } = string.Empty;
+}
+
+/// <summary>Renombrar un documento (RF-03, Administrador o Editor).</summary>
+public class SolicitudRenombrarDocumento
+{
+    public string Nombre { get; set; } = string.Empty;
+    public string Usuario { get; set; } = string.Empty;
+    public string Rol { get; set; } = string.Empty;
+}
+
 /// <summary>Mover un documento entre carpetas o subcarpetas (Administrador, Revisor y Editor).</summary>
 public class SolicitudMoverDocumento
 {
@@ -132,7 +199,14 @@ public class DocumentoResumen
     public DateTime FechaUltimaModificacion { get; set; }
     public bool Eliminado { get; set; }
     public DateTime? FechaEliminacion { get; set; }
+    public string? EliminadoPor { get; set; }
+    public string Autor { get; set; } = string.Empty;
+    public long TamanoBytes { get; set; }
+    public DateTime? FechaUltimaVersion { get; set; }
+    public bool TieneArchivoFisico { get; set; }
     public List<string> Etiquetas { get; set; } = new();
+    public int TotalComentarios { get; set; }
+    public List<string> SuscriptoresLiberacion { get; set; } = new();
 }
 
 public class BloqueoResumen

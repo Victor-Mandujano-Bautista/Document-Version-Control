@@ -21,12 +21,14 @@ public class Documento
     public string? ComentarioRevision { get; set; }
     public InfoBloqueo? Bloqueo { get; set; }
     public List<VersionDocumento> HistorialVersiones { get; set; } = new();
+    public List<ComentarioDocumento> Comentarios { get; set; } = new();
     public DateTime FechaCreacion { get; set; }
     public DateTime FechaUltimaModificacion { get; set; }
 
     /// <summary>Papelera (RF-10): borrado lógico. Un documento en papelera no se puede bloquear ni editar.</summary>
     public bool Eliminado { get; set; } = false;
     public DateTime? FechaEliminacion { get; set; }
+    public string? EliminadoPor { get; set; }
 
     /// <summary>Etiquetas separadas por coma (RF-14). Ej. "Urgente,Oficial".</summary>
     public string Etiquetas { get; set; } = string.Empty;
