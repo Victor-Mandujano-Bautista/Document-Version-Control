@@ -166,6 +166,38 @@ public class SolicitudMoverDocumento
     public string Rol { get; set; } = string.Empty;
 }
 
+/// <summary>Regla individual de permiso por rol dentro de SolicitudActualizarPermisosCarpeta (RF-12).</summary>
+public class ReglaPermisoRolDto
+{
+    public string Rol { get; set; } = string.Empty;
+    public string NivelAcceso { get; set; } = "Lectura";
+}
+
+/// <summary>Actualizar permisos por rol sobre una carpeta o subcarpeta (Solo Administrador - RF-12).</summary>
+public class SolicitudActualizarPermisosCarpeta
+{
+    public string Usuario { get; set; } = string.Empty;
+    public string Rol { get; set; } = string.Empty;
+    public bool HeredarDelPadre { get; set; } = false;
+    public List<ReglaPermisoRolDto> Permisos { get; set; } = new();
+}
+
+/// <summary>Mover una carpeta o subcarpeta dentro de otra carpeta o hacia la raíz (RF-04).</summary>
+public class SolicitudMoverCarpeta
+{
+    public int? NuevaCarpetaPadreId { get; set; }
+    public string Usuario { get; set; } = string.Empty;
+    public string Rol { get; set; } = string.Empty;
+}
+
+/// <summary>Actualizar el plazo de retención automática de la papelera de reciclaje (Solo Administrador - RF-10).</summary>
+public class SolicitudActualizarRetencionPapelera
+{
+    public int DiasRetencion { get; set; } = 30;
+    public string Usuario { get; set; } = string.Empty;
+    public string Rol { get; set; } = string.Empty;
+}
+
 // ── DTOs de Respuesta ──
 
 public class CarpetaResumen
@@ -179,6 +211,8 @@ public class CarpetaResumen
     public int TotalArchivos { get; set; }
     public int TotalSubcarpetas { get; set; }
     public int TotalDocumentos { get; set; }
+    public string NivelAccesoEfectivo { get; set; } = "Lectura";
+    public bool TienePermisosPersonalizados { get; set; }
 }
 
 public class DocumentoResumen
@@ -207,6 +241,11 @@ public class DocumentoResumen
     public List<string> Etiquetas { get; set; } = new();
     public int TotalComentarios { get; set; }
     public List<string> SuscriptoresLiberacion { get; set; } = new();
+    public string NivelAccesoCarpeta { get; set; } = "Lectura";
+    public bool CoincidenciaEnContenido { get; set; }
+    public string? ExtractoCoincidencia { get; set; }
+    public DateTime? FechaPurgaAutomatica { get; set; }
+    public int? DiasRestantesPapelera { get; set; }
 }
 
 public class BloqueoResumen

@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace DocControl.Api.Models;
 
 /// <summary>Entidad principal del documento empresarial.</summary>
@@ -32,6 +34,10 @@ public class Documento
 
     /// <summary>Etiquetas separadas por coma (RF-14). Ej. "Urgente,Oficial".</summary>
     public string Etiquetas { get; set; } = string.Empty;
+
+    /// <summary>Contenido de texto extraído de la versión vigente para búsquedas por contenido (RF-19).</summary>
+    [JsonIgnore]
+    public string? TextoIndexado { get; set; }
 
     /// <summary>Token de concurrencia optimista: evita que dos bloqueos simultáneos ganen a la vez.</summary>
     public byte[]? RowVersion { get; set; }

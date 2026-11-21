@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using DocControl.Api.Data;
 using DocControl.Api.Models;
+using DocControl.Api.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -10,12 +11,14 @@ namespace DocControl.Api.Controllers;
 public class ShareLinksController : ControllerBase
 {
     private readonly AppDbContext _context;
+    private readonly FolderPermissionService _folderPermissionService;
     private readonly string _contentRootPath;
     private readonly string _storagePath;
 
-    public ShareLinksController(AppDbContext context, IWebHostEnvironment env)
+    public ShareLinksController(AppDbContext context, IWebHostEnvironment env, FolderPermissionService folderPermissionService)
     {
         _context = context;
+        _folderPermissionService = folderPermissionService;
         _contentRootPath = Path.GetFullPath(env.ContentRootPath);
         _storagePath = Path.GetFullPath(Path.Combine(_contentRootPath, "Storage"));
     }
@@ -50,9 +53,6 @@ public class ShareLinksController : ControllerBase
         if (!TryParseRol(solicitud.Rol, out var rol))
             return BadRequest(new RespuestaError { Error = "Rol inválido", Detalle = $"El rol '{solicitud.Rol}' no es válido." });
 
-        if (rol != RolUsuario.Administrador && rol != RolUsuario.Revisor && rol != RolUsuario.Editor)
-            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, "crear enlaces compartidos temporales (no permitido para Lector)");
-
         if (string.IsNullOrWhiteSpace(solicitud.Usuario))
             return BadRequest(new RespuestaError { Error = "Operación denegada", Detalle = "El usuario es obligatorio." });
 
@@ -62,6 +62,12 @@ public class ShareLinksController : ControllerBase
 
         if (doc.Eliminado)
             return BadRequest(new RespuestaError { Error = "Documento en papelera", Detalle = "No se pueden generar enlaces de un documento en la papelera." });
+
+        string nivelCarpeta = await _folderPermissionService.ObtenerNivelAccesoEfectivoAsync(doc.CarpetaId, doc.Departamento, rol.ToString());
+        bool permitidoEnlace = FolderPermissionService.CumpleNivelMinimo(nivelCarpeta, FolderPermissionService.Edicion) ||
+            (rol == RolUsuario.Revisor && nivelCarpeta != FolderPermissionService.SinAcceso);
+        if (!permitidoEnlace)
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, $"crear enlaces compartidos temporales en la carpeta '{doc.Departamento}' (nivel actual: {nivelCarpeta})");
 
         var ahora = DateTime.UtcNow;
         DateTime fechaExpiracion;

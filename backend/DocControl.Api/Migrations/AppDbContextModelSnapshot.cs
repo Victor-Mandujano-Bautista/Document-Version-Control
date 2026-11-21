@@ -183,6 +183,50 @@ namespace DocControl.Api.Migrations
                         });
                 });
 
+            modelBuilder.Entity("DocControl.Api.Models.ConfiguracionSistema", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("ActualizadoPor")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("Clave")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<DateTime>("FechaActualizacion")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Valor")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Clave")
+                        .IsUnique();
+
+                    b.ToTable("ConfiguracionesSistema");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            ActualizadoPor = "Sistema",
+                            Clave = "PapeleraDiasRetencion",
+                            FechaActualizacion = new DateTime(2026, 11, 1, 12, 0, 0, 0, DateTimeKind.Utc),
+                            Valor = "30"
+                        });
+                });
+
             modelBuilder.Entity("DocControl.Api.Models.Documento", b =>
                 {
                     b.Property<int>("Id")
@@ -254,6 +298,9 @@ namespace DocControl.Api.Migrations
                         .IsConcurrencyToken()
                         .ValueGeneratedOnAddOrUpdate()
                         .HasColumnType("rowversion");
+
+                    b.Property<string>("TextoIndexado")
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("Tipo")
                         .IsRequired()
@@ -551,6 +598,43 @@ namespace DocControl.Api.Migrations
                         });
                 });
 
+            modelBuilder.Entity("DocControl.Api.Models.PermisoCarpeta", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("ActualizadoPor")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<int>("CarpetaId")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("FechaActualizacion")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("NivelAcceso")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<string>("Rol")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CarpetaId", "Rol")
+                        .IsUnique();
+
+                    b.ToTable("PermisosCarpeta");
+                });
+
             modelBuilder.Entity("DocControl.Api.Models.RegistroBitacora", b =>
                 {
                     b.Property<int>("Folio")
@@ -607,6 +691,76 @@ namespace DocControl.Api.Migrations
                     b.HasIndex("FechaHora");
 
                     b.ToTable("Bitacora");
+                });
+
+            modelBuilder.Entity("DocControl.Api.Models.RegistroRespaldo", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("CreadoPor")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("DetalleError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("Estado")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<DateTime>("FechaCreacion")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("FechaUltimaRestauracion")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("HashIntegridad")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("NombreArchivo")
+                        .IsRequired()
+                        .HasMaxLength(260)
+                        .HasColumnType("nvarchar(260)");
+
+                    b.Property<string>("RutaArchivo")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<long>("TamanoBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("Tipo")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)");
+
+                    b.Property<int>("TotalArchivosFisicos")
+                        .HasColumnType("int");
+
+                    b.Property<int>("TotalCarpetas")
+                        .HasColumnType("int");
+
+                    b.Property<int>("TotalDocumentos")
+                        .HasColumnType("int");
+
+                    b.Property<int>("TotalVersiones")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("FechaCreacion");
+
+                    b.ToTable("RegistrosRespaldo");
                 });
 
             modelBuilder.Entity("DocControl.Api.Models.SuscripcionLiberacion", b =>
@@ -691,6 +845,9 @@ namespace DocControl.Api.Migrations
 
                     b.Property<long>("TamanoBytes")
                         .HasColumnType("bigint");
+
+                    b.Property<string>("TextoIndexado")
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("VersionTexto")
                         .IsRequired()
@@ -963,6 +1120,15 @@ namespace DocControl.Api.Migrations
                         .WithMany()
                         .HasForeignKey("DocumentoId")
                         .OnDelete(DeleteBehavior.SetNull);
+                });
+
+            modelBuilder.Entity("DocControl.Api.Models.PermisoCarpeta", b =>
+                {
+                    b.HasOne("DocControl.Api.Models.Carpeta", null)
+                        .WithMany()
+                        .HasForeignKey("CarpetaId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("DocControl.Api.Models.SuscripcionLiberacion", b =>

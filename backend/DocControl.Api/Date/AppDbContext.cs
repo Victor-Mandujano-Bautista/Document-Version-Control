@@ -20,6 +20,9 @@ public class AppDbContext : DbContext
     public DbSet<Notificacion> Notificaciones => Set<Notificacion>();
     public DbSet<SuscripcionLiberacion> SuscripcionesLiberacion => Set<SuscripcionLiberacion>();
     public DbSet<EnlaceCompartido> EnlacesCompartidos => Set<EnlaceCompartido>();
+    public DbSet<PermisoCarpeta> PermisosCarpeta => Set<PermisoCarpeta>();
+    public DbSet<ConfiguracionSistema> ConfiguracionesSistema => Set<ConfiguracionSistema>();
+    public DbSet<RegistroRespaldo> RegistrosRespaldo => Set<RegistroRespaldo>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
@@ -166,6 +169,49 @@ public class AppDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(l => l.DocumentoId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<PermisoCarpeta>(e =>
+        {
+            e.HasKey(p => p.Id);
+            e.Property(p => p.Rol).IsRequired().HasMaxLength(30);
+            e.Property(p => p.NivelAcceso).IsRequired().HasMaxLength(30);
+            e.Property(p => p.ActualizadoPor).IsRequired().HasMaxLength(100);
+            e.HasIndex(p => new { p.CarpetaId, p.Rol }).IsUnique();
+            e.HasOne<Carpeta>()
+                .WithMany()
+                .HasForeignKey(p => p.CarpetaId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ConfiguracionSistema>(e =>
+        {
+            e.HasKey(c => c.Id);
+            e.Property(c => c.Clave).IsRequired().HasMaxLength(100);
+            e.HasIndex(c => c.Clave).IsUnique();
+            e.Property(c => c.Valor).IsRequired().HasMaxLength(500);
+            e.Property(c => c.ActualizadoPor).IsRequired().HasMaxLength(100);
+            e.HasData(new
+            {
+                Id = 1,
+                Clave = "PapeleraDiasRetencion",
+                Valor = "30",
+                ActualizadoPor = "Sistema",
+                FechaActualizacion = new DateTime(2026, 11, 1, 12, 0, 0, DateTimeKind.Utc)
+            });
+        });
+
+        modelBuilder.Entity<RegistroRespaldo>(e =>
+        {
+            e.HasKey(r => r.Id);
+            e.Property(r => r.NombreArchivo).IsRequired().HasMaxLength(260);
+            e.Property(r => r.RutaArchivo).IsRequired().HasMaxLength(500);
+            e.Property(r => r.Tipo).IsRequired().HasMaxLength(30);
+            e.Property(r => r.Estado).IsRequired().HasMaxLength(30);
+            e.Property(r => r.HashIntegridad).IsRequired().HasMaxLength(64);
+            e.Property(r => r.CreadoPor).IsRequired().HasMaxLength(100);
+            e.Property(r => r.DetalleError).HasMaxLength(2000);
+            e.HasIndex(r => r.FechaCreacion);
         });
 
         // ── Data Seeding ──

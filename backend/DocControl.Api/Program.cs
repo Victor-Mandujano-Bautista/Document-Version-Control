@@ -19,9 +19,14 @@ builder.Services.AddOpenApi();
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 
-// Servicio centinela: libera bloqueos expirados cada 30 segundos
+// Servicios en segundo plano y servicios de negocio
 builder.Services.AddHostedService<LockExpirationWorker>();
+builder.Services.AddHostedService<RecycleBinCleanupWorker>();
+builder.Services.AddHostedService<ScheduledBackupWorker>();
 builder.Services.AddScoped<NotificationService>();
+builder.Services.AddScoped<FolderPermissionService>();
+builder.Services.AddScoped<ContentIndexingService>();
+builder.Services.AddScoped<BackupService>();
 
 var app = builder.Build();
 

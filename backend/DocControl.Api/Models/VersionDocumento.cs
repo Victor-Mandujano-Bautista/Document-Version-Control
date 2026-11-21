@@ -26,4 +26,8 @@ public class VersionDocumento
 
     /// <summary>¿Por qué se hizo el cambio? (RF-06). Complementa a Comentario (¿qué se hizo?).</summary>
     public string MotivoCambio { get; set; } = string.Empty;
+
+    /// <summary>Contenido de texto extraído del archivo físico (.pdf / .txt) para indexación (RF-19).</summary>
+    [JsonIgnore]
+    public string? TextoIndexado { get; set; }
 }

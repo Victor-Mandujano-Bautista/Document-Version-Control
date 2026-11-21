@@ -19,12 +19,20 @@ public class DocumentsController : ControllerBase
     private static readonly string[] ColoresPermitidos = ["Rojo", "Amarillo", "Azul", "Verde", "Morado", "Cian"];
 
     private readonly AppDbContext _context;
+    private readonly FolderPermissionService _folderPermissionService;
+    private readonly ContentIndexingService _contentIndexingService;
     private readonly string _contentRootPath;
     private readonly string _storagePath;
 
-    public DocumentsController(AppDbContext context, IWebHostEnvironment env)
+    public DocumentsController(
+        AppDbContext context,
+        IWebHostEnvironment env,
+        FolderPermissionService folderPermissionService,
+        ContentIndexingService contentIndexingService)
     {
         _context = context;
+        _folderPermissionService = folderPermissionService;
+        _contentIndexingService = contentIndexingService;
         _contentRootPath = Path.GetFullPath(env.ContentRootPath);
         // Carpeta física "Storage" en la raíz del backend (junto a Program.cs)
         _storagePath = Path.GetFullPath(Path.Combine(_contentRootPath, "Storage"));
@@ -37,11 +45,19 @@ public class DocumentsController : ControllerBase
     /// <summary>
     /// Obtener documentos con su estado actual. Por defecto solo los activos;
     /// con <c>?incluirEliminados=true</c> también los de la papelera (propiedad <c>eliminado</c>).
+    /// Filtra documentos cuya carpeta tenga "SinAcceso" para el rol activo (RF-12).
     /// </summary>
     [HttpGet]
-    public async Task<IActionResult> ObtenerDocumentos([FromQuery] bool incluirEliminados = false)
+    public async Task<IActionResult> ObtenerDocumentos([FromQuery] bool incluirEliminados = false, [FromQuery] string? rol = null)
     {
         await LiberarBloqueosExpiradosAsync();
+
+        string? rolEfectivo = !string.IsNullOrWhiteSpace(rol)
+            ? rol.Trim()
+            : Request.Headers["X-Rol"].FirstOrDefault()?.Trim();
+
+        var todasCarpetas = await _context.Carpetas.AsNoTracking().ToListAsync();
+        var todosPermisos = await _context.PermisosCarpeta.AsNoTracking().ToListAsync();
 
         var query = _context.Documentos
             .AsNoTracking()
@@ -59,24 +75,33 @@ public class DocumentsController : ControllerBase
             .Where(s => !s.Notificado)
             .ToListAsync();
 
-        var resultado = docs.Select(doc =>
+        int diasRetencion = await ObtenerDiasRetencionPapeleraAsync();
+
+        var resultado = new List<DocumentoResumen>();
+        foreach (var doc in docs)
         {
-            var res = MapearAResumen(doc);
+            string nivelCarpeta = ResolverNivelCarpetaDocumento(doc.CarpetaId, doc.Departamento, rolEfectivo, todasCarpetas, todosPermisos);
+            if (!doc.Eliminado && !string.IsNullOrWhiteSpace(rolEfectivo) && nivelCarpeta == FolderPermissionService.SinAcceso)
+                continue;
+
+            var res = MapearAResumen(doc, nivelCarpeta, diasRetencion);
             res.SuscriptoresLiberacion = suscripciones
                 .Where(s => s.DocumentoId == doc.Id)
                 .Select(s => s.Usuario)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
-            return res;
-        }).ToList();
+            resultado.Add(res);
+        }
 
         return Ok(resultado);
     }
 
-    /// <summary>Obtener únicamente los documentos de la papelera (RF-10).</summary>
+    /// <summary>Obtener únicamente los documentos de la papelera (RF-10) incluyendo días restantes para purga automática.</summary>
     [HttpGet("papelera")]
     public async Task<IActionResult> ObtenerPapelera()
     {
+        int diasRetencion = await ObtenerDiasRetencionPapeleraAsync();
+
         var docs = await _context.Documentos
             .AsNoTracking()
             .Include(d => d.HistorialVersiones)
@@ -85,7 +110,7 @@ public class DocumentsController : ControllerBase
             .OrderByDescending(d => d.FechaEliminacion)
             .ToListAsync();
 
-        return Ok(docs.Select(MapearAResumen).ToList());
+        return Ok(docs.Select(d => MapearAResumen(d, FolderPermissionService.Lectura, diasRetencion)).ToList());
     }
 
     /// <summary>Obtener KPIs de resumen del workspace (los documentos en papelera no cuentan como activos).</summary>
@@ -159,16 +184,27 @@ public class DocumentsController : ControllerBase
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  GESTIÓN DE CARPETAS / FOLDERS (JERARQUÍA MULTINIVEL RF-04)
+    //  GESTIÓN DE CARPETAS / FOLDERS (JERARQUÍA MULTINIVEL RF-04 + PERMISOS RF-12)
     // ═══════════════════════════════════════════════════════════
 
-    /// <summary>Obtener todas las carpetas (raíz y subcarpetas) con conteos de archivos directos y subcarpetas.</summary>
+    /// <summary>
+    /// Obtener todas las carpetas accesibles (raíz y subcarpetas) con conteos de archivos directos,
+    /// subcarpetas y nivel de acceso efectivo para el rol activo (RF-12).
+    /// </summary>
     [HttpGet("folders")]
-    public async Task<IActionResult> ObtenerCarpetas()
+    public async Task<IActionResult> ObtenerCarpetas([FromQuery] string? rol = null)
     {
+        string? rolEfectivo = !string.IsNullOrWhiteSpace(rol)
+            ? rol.Trim()
+            : Request.Headers["X-Rol"].FirstOrDefault()?.Trim();
+
         var carpetas = await _context.Carpetas
             .AsNoTracking()
             .OrderBy(c => c.Id)
+            .ToListAsync();
+
+        var todosPermisos = await _context.PermisosCarpeta
+            .AsNoTracking()
             .ToListAsync();
 
         var documentosActivos = await _context.Documentos
@@ -177,16 +213,29 @@ public class DocumentsController : ControllerBase
             .Select(d => new { d.CarpetaId, d.Departamento })
             .ToListAsync();
 
-        var resultado = carpetas.Select(c =>
+        var nivelesPorCarpeta = carpetas.ToDictionary(
+            c => c.Id,
+            c => ResolverNivelCarpetaEfectivoConAncestros(c.Id, rolEfectivo, carpetas, todosPermisos));
+
+        var resultado = new List<CarpetaResumen>();
+        foreach (var c in carpetas)
         {
+            string nivel = nivelesPorCarpeta[c.Id];
+            if (!string.IsNullOrWhiteSpace(rolEfectivo) && nivel == FolderPermissionService.SinAcceso)
+                continue;
+
             int totalArchivos = documentosActivos.Count(d =>
                 d.CarpetaId == c.Id ||
                 (d.CarpetaId == null && c.CarpetaPadreId == null &&
                  string.Equals(d.Departamento, c.Nombre, StringComparison.OrdinalIgnoreCase)));
 
-            int totalSubcarpetas = carpetas.Count(sub => sub.CarpetaPadreId == c.Id);
+            int totalSubcarpetas = carpetas.Count(sub =>
+                sub.CarpetaPadreId == c.Id &&
+                (string.IsNullOrWhiteSpace(rolEfectivo) || nivelesPorCarpeta[sub.Id] != FolderPermissionService.SinAcceso));
 
-            return new CarpetaResumen
+            bool tienePersonalizados = todosPermisos.Any(p => p.CarpetaId == c.Id);
+
+            resultado.Add(new CarpetaResumen
             {
                 Id = c.Id,
                 Nombre = c.Nombre,
@@ -196,24 +245,21 @@ public class DocumentsController : ControllerBase
                 CarpetaPadreId = c.CarpetaPadreId,
                 TotalArchivos = totalArchivos,
                 TotalSubcarpetas = totalSubcarpetas,
-                TotalDocumentos = totalArchivos
-            };
-        }).ToList();
+                TotalDocumentos = totalArchivos,
+                NivelAccesoEfectivo = nivel,
+                TienePermisosPersonalizados = tienePersonalizados
+            });
+        }
 
         return Ok(resultado);
     }
 
-    /// <summary>Crear una nueva carpeta raíz o subcarpeta (Solo Administrador o Revisor).</summary>
+    /// <summary>Crear una nueva carpeta raíz o subcarpeta (validando permisos por carpeta RF-12).</summary>
     [HttpPost("folders")]
     public async Task<IActionResult> CrearCarpeta([FromBody] SolicitudCrearCarpeta solicitud)
     {
         if (!TryParseRol(solicitud.Rol, out var rol))
             return RolInvalido(solicitud.Rol);
-
-        if (rol != RolUsuario.Administrador && rol != RolUsuario.Revisor)
-            return await DenegarAccesoAsync(solicitud.Usuario, rol, null,
-                "crear carpetas (solo Administrador o Revisor)",
-                codigoReferencia: "FOLDER", nombreReferencia: solicitud.Nombre);
 
         if (string.IsNullOrWhiteSpace(solicitud.Usuario))
             return Denegado("El usuario es obligatorio.");
@@ -241,6 +287,29 @@ public class DocumentsController : ControllerBase
                     Error = "Carpeta padre no encontrada",
                     Detalle = $"La carpeta padre con Id {solicitud.CarpetaPadreId.Value} no existe."
                 });
+
+            // Para crear subcarpetas se requiere nivel Administracion en la carpeta padre (o Revisor si no fue restringido)
+            var todasCarpetas = await _context.Carpetas.AsNoTracking().ToListAsync();
+            var todosPermisos = await _context.PermisosCarpeta.AsNoTracking().ToListAsync();
+            var resPermiso = _folderPermissionService.ResolverPermisoEnMemoria(carpetaPadre.Id, rol.ToString(), todasCarpetas, todosPermisos);
+            string nivelPadre = ResolverNivelCarpetaEfectivoConAncestros(carpetaPadre.Id, rol.ToString(), todasCarpetas, todosPermisos);
+
+            bool permitidoSubcarpeta = nivelPadre == FolderPermissionService.Administracion ||
+                (rol == RolUsuario.Revisor && nivelPadre != FolderPermissionService.SinAcceso && !resPermiso.EsReglaPropia && resPermiso.CarpetaOrigenId == null);
+
+            if (!permitidoSubcarpeta)
+            {
+                return await DenegarAccesoAsync(solicitud.Usuario, rol, null,
+                    $"crear subcarpetas en '{carpetaPadre.Nombre}' (se requiere permiso de Administración en la carpeta; nivel actual: {nivelPadre})",
+                    codigoReferencia: "FOLDER", nombreReferencia: nombre);
+            }
+        }
+        else
+        {
+            if (rol != RolUsuario.Administrador && rol != RolUsuario.Revisor)
+                return await DenegarAccesoAsync(solicitud.Usuario, rol, null,
+                    "crear carpetas raíz (solo Administrador o Revisor)",
+                    codigoReferencia: "FOLDER", nombreReferencia: solicitud.Nombre);
         }
 
         if (await _context.Carpetas.AnyAsync(c => c.CarpetaPadreId == solicitud.CarpetaPadreId && c.Nombre == nombre))
@@ -290,13 +359,15 @@ public class DocumentsController : ControllerBase
                 CarpetaPadreId = carpeta.CarpetaPadreId,
                 TotalArchivos = 0,
                 TotalSubcarpetas = 0,
-                TotalDocumentos = 0
+                TotalDocumentos = 0,
+                NivelAccesoEfectivo = FolderPermissionService.Administracion,
+                TienePermisosPersonalizados = false
             }
         });
     }
 
     /// <summary>
-    /// Modificar únicamente Nombre y Color de una carpeta (Solo Administrador o Revisor).
+    /// Modificar únicamente Nombre y Color de una carpeta (requiere nivel Administracion en la carpeta o Revisor no restringido - RF-12).
     /// PROHIBIDO modificar CreadoPor o FechaCreacion. Si el Nombre cambia, actualiza el Departamento
     /// de todos los documentos que pertenecían a ese folder.
     /// </summary>
@@ -306,17 +377,27 @@ public class DocumentsController : ControllerBase
         if (!TryParseRol(solicitud.Rol, out var rol))
             return RolInvalido(solicitud.Rol);
 
-        if (rol != RolUsuario.Administrador && rol != RolUsuario.Revisor)
-            return await DenegarAccesoAsync(solicitud.Usuario, rol, null,
-                "modificar carpetas (solo Administrador o Revisor)",
-                codigoReferencia: $"FOLDER-{id}", nombreReferencia: solicitud.Nombre);
-
         if (string.IsNullOrWhiteSpace(solicitud.Usuario))
             return Denegado("El usuario es obligatorio.");
 
         var carpeta = await _context.Carpetas.FirstOrDefaultAsync(c => c.Id == id);
         if (carpeta == null)
             return NotFound(new RespuestaError { Error = "No encontrado", Detalle = $"La carpeta con Id {id} no existe." });
+
+        var todasCarpetas = await _context.Carpetas.AsNoTracking().ToListAsync();
+        var todosPermisos = await _context.PermisosCarpeta.AsNoTracking().ToListAsync();
+        var resPermiso = _folderPermissionService.ResolverPermisoEnMemoria(carpeta.Id, rol.ToString(), todasCarpetas, todosPermisos);
+        string nivelCarpeta = ResolverNivelCarpetaEfectivoConAncestros(carpeta.Id, rol.ToString(), todasCarpetas, todosPermisos);
+
+        bool permitidoEditarCarpeta = nivelCarpeta == FolderPermissionService.Administracion ||
+            (rol == RolUsuario.Revisor && nivelCarpeta != FolderPermissionService.SinAcceso && !resPermiso.EsReglaPropia && resPermiso.CarpetaOrigenId == null);
+
+        if (!permitidoEditarCarpeta)
+        {
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, null,
+                $"modificar la carpeta '{carpeta.Nombre}' (se requiere permiso de Administración en la carpeta; nivel actual: {nivelCarpeta})",
+                codigoReferencia: $"FOLDER-{id}", nombreReferencia: carpeta.Nombre);
+        }
 
         var nuevoNombre = solicitud.Nombre?.Trim() ?? string.Empty;
         if (nuevoNombre.Length == 0)
@@ -380,6 +461,7 @@ public class DocumentsController : ControllerBase
             (d.CarpetaId == carpeta.Id ||
              (d.CarpetaId == null && carpeta.CarpetaPadreId == null && d.Departamento == carpeta.Nombre)));
         int totalSubcarpetas = await _context.Carpetas.CountAsync(sub => sub.CarpetaPadreId == carpeta.Id);
+        bool tienePersonalizados = todosPermisos.Any(p => p.CarpetaId == carpeta.Id);
 
         return Ok(new
         {
@@ -394,8 +476,294 @@ public class DocumentsController : ControllerBase
                 CarpetaPadreId = carpeta.CarpetaPadreId,
                 TotalArchivos = totalArchivos,
                 TotalSubcarpetas = totalSubcarpetas,
-                TotalDocumentos = totalArchivos
+                TotalDocumentos = totalArchivos,
+                NivelAccesoEfectivo = nivelCarpeta,
+                TienePermisosPersonalizados = tienePersonalizados
             }
+        });
+    }
+
+    /// <summary>
+    /// Consultar las reglas de permisos configuradas y efectivas para los 4 roles sobre una carpeta (RF-12).
+    /// </summary>
+    [HttpGet("folders/{id:int}/permissions")]
+    public async Task<IActionResult> ObtenerPermisosCarpeta(int id)
+    {
+        var todasCarpetas = await _context.Carpetas.AsNoTracking().ToListAsync();
+        var carpeta = todasCarpetas.FirstOrDefault(c => c.Id == id);
+        if (carpeta == null)
+            return NotFound(new RespuestaError { Error = "No encontrado", Detalle = $"La carpeta con Id {id} no existe." });
+
+        var todosPermisos = await _context.PermisosCarpeta.AsNoTracking().ToListAsync();
+        bool tienePropios = todosPermisos.Any(p => p.CarpetaId == id);
+        bool heredaDelPadre = carpeta.CarpetaPadreId.HasValue && !tienePropios;
+
+        var detalleRoles = FolderPermissionService.RolesSistema.Select(rolNombre =>
+        {
+            var res = _folderPermissionService.ResolverPermisoEnMemoria(id, rolNombre, todasCarpetas, todosPermisos);
+            string nivelEfectivo = ResolverNivelCarpetaEfectivoConAncestros(id, rolNombre, todasCarpetas, todosPermisos);
+
+            string origenTexto;
+            if (rolNombre == "Administrador")
+            {
+                origenTexto = "Acceso total fijo del sistema";
+            }
+            else if (res.EsReglaPropia)
+            {
+                origenTexto = "Regla propia de esta carpeta";
+            }
+            else if (res.CarpetaOrigenId.HasValue)
+            {
+                var carpetaOrigen = todasCarpetas.FirstOrDefault(c => c.Id == res.CarpetaOrigenId.Value);
+                origenTexto = carpetaOrigen != null
+                    ? $"Heredado de '{carpetaOrigen.Nombre}'"
+                    : "Heredado de carpeta padre";
+            }
+            else
+            {
+                origenTexto = "Permiso base por defecto del rol";
+            }
+
+            return new
+            {
+                rol = rolNombre,
+                nivelAcceso = nivelEfectivo,
+                nivelEfectivo,
+                esReglaPropia = res.EsReglaPropia,
+                esHeredado = !res.EsReglaPropia,
+                origenTexto
+            };
+        }).ToList();
+
+        return Ok(new
+        {
+            carpetaId = carpeta.Id,
+            nombreCarpeta = carpeta.Nombre,
+            carpetaPadreId = carpeta.CarpetaPadreId,
+            tienePermisosPersonalizados = tienePropios,
+            heredarDelPadre = heredaDelPadre,
+            permisos = detalleRoles
+        });
+    }
+
+    /// <summary>
+    /// Configurar permisos personalizados por rol sobre una carpeta o subcarpeta (Solo Administrador - RF-12).
+    /// </summary>
+    [HttpPut("folders/{id:int}/permissions")]
+    public async Task<IActionResult> ActualizarPermisosCarpeta(int id, [FromBody] SolicitudActualizarPermisosCarpeta solicitud)
+    {
+        if (!TryParseRol(solicitud.Rol, out var rol))
+            return RolInvalido(solicitud.Rol);
+
+        var carpeta = await _context.Carpetas.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id);
+        if (carpeta == null)
+            return NotFound(new RespuestaError { Error = "No encontrado", Detalle = $"La carpeta con Id {id} no existe." });
+
+        if (rol != RolUsuario.Administrador)
+        {
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, null,
+                $"modificar los permisos de la carpeta '{carpeta.Nombre}' (exclusivo para Administrador)",
+                codigoReferencia: $"FOLDER-{id}", nombreReferencia: carpeta.Nombre);
+        }
+
+        string usuarioActor = string.IsNullOrWhiteSpace(solicitud.Usuario) ? "Elena Martínez" : solicitud.Usuario.Trim();
+        var existentes = await _context.PermisosCarpeta.Where(p => p.CarpetaId == id).ToListAsync();
+        var ahora = DateTime.UtcNow;
+
+        string resumenBitacora;
+
+        if (solicitud.HeredarDelPadre && carpeta.CarpetaPadreId.HasValue)
+        {
+            if (existentes.Count > 0)
+            {
+                _context.PermisosCarpeta.RemoveRange(existentes);
+            }
+            resumenBitacora = $"Subcarpeta '{carpeta.Nombre}' configurada para heredar los permisos de su carpeta padre.";
+        }
+        else
+        {
+            var cambiosTexto = new List<string>();
+            foreach (var rolSistema in FolderPermissionService.RolesSistema)
+            {
+                string nivelFinal;
+                if (rolSistema == "Administrador")
+                {
+                    nivelFinal = FolderPermissionService.Administracion;
+                }
+                else
+                {
+                    var enviado = solicitud.Permisos?.FirstOrDefault(p =>
+                        string.Equals(p.Rol?.Trim(), rolSistema, StringComparison.OrdinalIgnoreCase));
+
+                    if (enviado != null)
+                    {
+                        var normalizado = FolderPermissionService.NormalizarNivelAcceso(enviado.NivelAcceso);
+                        if (normalizado == null)
+                            return Denegado($"El nivel de acceso '{enviado.NivelAcceso}' para el rol '{rolSistema}' no es válido. Use: SinAcceso, Lectura, Edicion o Administracion.");
+                        nivelFinal = normalizado;
+                    }
+                    else
+                    {
+                        nivelFinal = FolderPermissionService.ObtenerNivelPorDefecto(rolSistema);
+                    }
+                }
+
+                var regExistente = existentes.FirstOrDefault(e =>
+                    string.Equals(e.Rol, rolSistema, StringComparison.OrdinalIgnoreCase));
+
+                if (regExistente != null)
+                {
+                    regExistente.Rol = rolSistema;
+                    regExistente.NivelAcceso = nivelFinal;
+                    regExistente.ActualizadoPor = usuarioActor;
+                    regExistente.FechaActualizacion = ahora;
+                }
+                else
+                {
+                    _context.PermisosCarpeta.Add(new PermisoCarpeta
+                    {
+                        CarpetaId = id,
+                        Rol = rolSistema,
+                        NivelAcceso = nivelFinal,
+                        ActualizadoPor = usuarioActor,
+                        FechaActualizacion = ahora
+                    });
+                }
+
+                cambiosTexto.Add($"{rolSistema}: {nivelFinal}");
+            }
+
+            resumenBitacora = $"Permisos de la carpeta '{carpeta.Nombre}' actualizados ({string.Join(", ", cambiosTexto)}).";
+        }
+
+        RegistrarEnBitacora(usuarioActor, rol, "FOLDER", carpeta.Nombre, "-",
+            AccionBitacora.ACTUALIZAR_PERMISOS_CARPETA,
+            resumenBitacora);
+
+        await _context.SaveChangesAsync();
+
+        return await ObtenerPermisosCarpeta(id);
+    }
+
+    /// <summary>
+    /// Mover una carpeta o subcarpeta hacia otra carpeta padre o al nivel raíz con validación estricta anti-ciclos (RF-04).
+    /// </summary>
+    [HttpPut("folders/{id:int}/move")]
+    public async Task<IActionResult> MoverCarpeta(int id, [FromBody] SolicitudMoverCarpeta solicitud)
+    {
+        if (!TryParseRol(solicitud.Rol, out var rol))
+            return RolInvalido(solicitud.Rol);
+
+        if (string.IsNullOrWhiteSpace(solicitud.Usuario))
+            return Denegado("El usuario es obligatorio.");
+
+        var carpeta = await _context.Carpetas.FirstOrDefaultAsync(c => c.Id == id);
+        if (carpeta == null)
+            return NotFound(new RespuestaError { Error = "No encontrado", Detalle = $"La carpeta con Id {id} no existe." });
+
+        var todasCarpetas = await _context.Carpetas.AsNoTracking().ToListAsync();
+        var todosPermisos = await _context.PermisosCarpeta.AsNoTracking().ToListAsync();
+
+        // Autorización en carpeta origen: Administrador, Revisor (no restringido), o permiso efectivo "Administracion"
+        var resPermOrigen = _folderPermissionService.ResolverPermisoEnMemoria(carpeta.Id, rol.ToString(), todasCarpetas, todosPermisos);
+        string nivelOrigen = ResolverNivelCarpetaEfectivoConAncestros(carpeta.Id, rol.ToString(), todasCarpetas, todosPermisos);
+        bool autorizadoOrigen = rol == RolUsuario.Administrador ||
+            nivelOrigen == FolderPermissionService.Administracion ||
+            (rol == RolUsuario.Revisor && nivelOrigen != FolderPermissionService.SinAcceso && !resPermOrigen.EsReglaPropia && resPermOrigen.CarpetaOrigenId == null);
+
+        if (!autorizadoOrigen)
+        {
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, null,
+                $"mover la carpeta '{carpeta.Nombre}' (se requiere permiso de Administración; nivel actual: {nivelOrigen})",
+                codigoReferencia: $"FOLDER-{id}", nombreReferencia: carpeta.Nombre);
+        }
+
+        // Prevención estricta de ciclos: no puede moverse dentro de sí misma
+        if (solicitud.NuevaCarpetaPadreId.HasValue && solicitud.NuevaCarpetaPadreId.Value == id)
+        {
+            return Denegado("No puedes mover una carpeta dentro de sí misma.");
+        }
+
+        Carpeta? nuevaPadre = null;
+        if (solicitud.NuevaCarpetaPadreId.HasValue)
+        {
+            nuevaPadre = todasCarpetas.FirstOrDefault(c => c.Id == solicitud.NuevaCarpetaPadreId.Value);
+            if (nuevaPadre == null)
+                return NotFound(new RespuestaError
+                {
+                    Error = "Carpeta destino no encontrada",
+                    Detalle = $"La carpeta destino con Id {solicitud.NuevaCarpetaPadreId.Value} no existe."
+                });
+
+            // Recorrer hacia arriba desde nuevaCarpetaPadreId hasta la raíz para impedir ciclos
+            var visitados = new HashSet<int>();
+            int? cursorPadreId = nuevaPadre.Id;
+            while (cursorPadreId.HasValue && visitados.Add(cursorPadreId.Value))
+            {
+                if (cursorPadreId.Value == id)
+                {
+                    return Denegado("No puedes mover una carpeta dentro de una de sus propias subcarpetas.");
+                }
+                var nodo = todasCarpetas.FirstOrDefault(c => c.Id == cursorPadreId.Value);
+                cursorPadreId = nodo?.CarpetaPadreId;
+            }
+
+            // Autorización sobre la carpeta destino
+            var resPermDestino = _folderPermissionService.ResolverPermisoEnMemoria(nuevaPadre.Id, rol.ToString(), todasCarpetas, todosPermisos);
+            string nivelDestino = ResolverNivelCarpetaEfectivoConAncestros(nuevaPadre.Id, rol.ToString(), todasCarpetas, todosPermisos);
+            bool autorizadoDestino = rol == RolUsuario.Administrador ||
+                nivelDestino == FolderPermissionService.Administracion ||
+                (rol == RolUsuario.Revisor && nivelDestino != FolderPermissionService.SinAcceso && !resPermDestino.EsReglaPropia && resPermDestino.CarpetaOrigenId == null);
+
+            if (!autorizadoDestino)
+            {
+                return await DenegarAccesoAsync(solicitud.Usuario, rol, null,
+                    $"mover carpetas hacia '{nuevaPadre.Nombre}' (se requiere permiso de Administración en el destino; nivel actual: {nivelDestino})",
+                    codigoReferencia: $"FOLDER-{id}", nombreReferencia: carpeta.Nombre);
+            }
+        }
+
+        if (carpeta.CarpetaPadreId == solicitud.NuevaCarpetaPadreId)
+        {
+            return Denegado("La carpeta ya se encuentra en esa ubicación.");
+        }
+
+        // Validar que no exista otra carpeta hermana con el mismo nombre en el nivel destino
+        bool existeDuplicada = todasCarpetas.Any(c =>
+            c.Id != id &&
+            c.CarpetaPadreId == solicitud.NuevaCarpetaPadreId &&
+            string.Equals(c.Nombre, carpeta.Nombre, StringComparison.OrdinalIgnoreCase));
+
+        if (existeDuplicada)
+        {
+            string ubicacionTexto = nuevaPadre != null ? $"dentro de '{nuevaPadre.Nombre}'" : "en el nivel Raíz";
+            return Conflict(new RespuestaError
+            {
+                Error = "Carpeta duplicada en destino",
+                Detalle = $"Ya existe una carpeta llamada '{carpeta.Nombre}' {ubicacionTexto}."
+            });
+        }
+
+        string padreAnteriorNombre = carpeta.CarpetaPadreId.HasValue
+            ? ConstruirRutaCarpeta(carpeta.CarpetaPadreId, "Raíz", todasCarpetas)
+            : "Raíz";
+        string nuevoPadreNombre = nuevaPadre != null
+            ? ConstruirRutaCarpeta(nuevaPadre.Id, nuevaPadre.Nombre, todasCarpetas)
+            : "Raíz";
+
+        carpeta.CarpetaPadreId = solicitud.NuevaCarpetaPadreId;
+
+        RegistrarEnBitacora(solicitud.Usuario.Trim(), rol, "FOLDER", carpeta.Nombre, "-",
+            AccionBitacora.MOVER_CARPETA,
+            $"Carpeta '{carpeta.Nombre}' movida de '{padreAnteriorNombre}' hacia '{nuevoPadreNombre}'.");
+
+        await _context.SaveChangesAsync();
+
+        return Ok(new
+        {
+            mensaje = $"Carpeta '{carpeta.Nombre}' movida exitosamente a '{nuevoPadreNombre}'.",
+            carpetaId = carpeta.Id,
+            nuevaCarpetaPadreId = carpeta.CarpetaPadreId
         });
     }
 
@@ -403,21 +771,22 @@ public class DocumentsController : ControllerBase
     //  BLOQUEO (CHECK-OUT)
     // ═══════════════════════════════════════════════════════════
 
-    /// <summary>Bloquear un documento para edición exclusiva (Check-out).</summary>
+    /// <summary>Bloquear un documento para edición exclusiva (Check-out). Requiere nivel Edicion o Administracion en la carpeta (RF-12).</summary>
     [HttpPost("{id}/lock")]
     public async Task<IActionResult> BloquearDocumento(int id, [FromBody] SolicitudBloqueo solicitud)
     {
         if (!TryParseRol(solicitud.Rol, out var rol))
             return RolInvalido(solicitud.Rol);
 
-        if (rol != RolUsuario.Editor && rol != RolUsuario.Administrador)
-            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, "bloquear documentos (check-out)");
-
         await LiberarBloqueosExpiradosAsync();
 
         var doc = await CargarDocumentoAsync(id);
         if (doc == null) return NoEncontrado(id);
         if (doc.Eliminado) return EnPapelera(doc);
+
+        string nivelCarpeta = await ObtenerNivelCarpetaDocumentoAsync(doc.CarpetaId, doc.Departamento, rol.ToString());
+        if (!FolderPermissionService.CumpleNivelMinimo(nivelCarpeta, FolderPermissionService.Edicion))
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, $"bloquear documentos para edición en la carpeta '{doc.Departamento}' (nivel actual: {nivelCarpeta})");
 
         if (doc.Estado == EstadoDocumento.Bloqueado && doc.Bloqueo != null && !doc.Bloqueo.EstaExpirado)
             return Conflicto(doc);
@@ -464,12 +833,13 @@ public class DocumentsController : ControllerBase
         if (!TryParseRol(solicitud.Rol, out var rol))
             return RolInvalido(solicitud.Rol);
 
-        if (rol != RolUsuario.Editor && rol != RolUsuario.Administrador)
-            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, "extender bloqueos de edición");
-
         var doc = await CargarDocumentoAsync(id);
         if (doc == null) return NoEncontrado(id);
         if (doc.Eliminado) return EnPapelera(doc);
+
+        string nivelCarpeta = await ObtenerNivelCarpetaDocumentoAsync(doc.CarpetaId, doc.Departamento, rol.ToString());
+        if (!FolderPermissionService.CumpleNivelMinimo(nivelCarpeta, FolderPermissionService.Edicion))
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, $"extender bloqueos de edición en la carpeta '{doc.Departamento}' (nivel actual: {nivelCarpeta})");
 
         if (doc.Estado != EstadoDocumento.Bloqueado || doc.Bloqueo == null)
             return Denegado("El documento no está bloqueado actualmente.");
@@ -495,12 +865,12 @@ public class DocumentsController : ControllerBase
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  CHECK-IN (NUEVA VERSIÓN CON ARCHIVO FÍSICO)
+    //  CHECK-IN (NUEVA VERSIÓN CON ARCHIVO FÍSICO + INDEXACIÓN RF-19)
     // ═══════════════════════════════════════════════════════════
 
     /// <summary>
     /// Subir una nueva versión del documento (Check-in) como multipart/form-data (hasta 500 MB).
-    /// Guarda el binario en /Storage, calcula el SHA-256 real y registra tamaño, qué se hizo y por qué.
+    /// Guarda el binario en /Storage, calcula el SHA-256 real, extrae el texto si es PDF/TXT (RF-19) y registra auditoría.
     /// </summary>
     [HttpPost("{id}/checkin")]
     [Consumes("multipart/form-data")]
@@ -516,9 +886,6 @@ public class DocumentsController : ControllerBase
     {
         if (!TryParseRol(rol, out var rolParseado))
             return RolInvalido(rol);
-
-        if (rolParseado != RolUsuario.Editor && rolParseado != RolUsuario.Administrador)
-            return await DenegarAccesoAsync(usuario, rolParseado, id, "subir nuevas versiones (check-in)");
 
         if (string.IsNullOrWhiteSpace(usuario))
             return Denegado("El usuario es obligatorio.");
@@ -546,6 +913,10 @@ public class DocumentsController : ControllerBase
             .FirstOrDefaultAsync(d => d.Id == id);
         if (doc == null) return NoEncontrado(id);
         if (doc.Eliminado) return EnPapelera(doc);
+
+        string nivelCarpeta = await ObtenerNivelCarpetaDocumentoAsync(doc.CarpetaId, doc.Departamento, rolParseado.ToString());
+        if (!FolderPermissionService.CumpleNivelMinimo(nivelCarpeta, FolderPermissionService.Edicion))
+            return await DenegarAccesoAsync(usuario, rolParseado, id, $"subir nuevas versiones (check-in) en la carpeta '{doc.Departamento}' (nivel actual: {nivelCarpeta})");
 
         if (doc.Estado != EstadoDocumento.Bloqueado || doc.Bloqueo == null)
             return Denegado("El documento no está bloqueado. Debe hacer check-out primero.");
@@ -582,6 +953,8 @@ public class DocumentsController : ControllerBase
         try
         {
             string hash = await GuardarArchivoAsync(file, nombreAlmacenado);
+            string? rutaFisica = ResolvePhysicalFilePath(nombreAlmacenado);
+            string? textoExtraido = await _contentIndexingService.ExtractTextAsync(rutaFisica, extSubida);
 
             doc.HistorialVersiones.Add(new VersionDocumento
             {
@@ -594,12 +967,14 @@ public class DocumentsController : ControllerBase
                 MotivoCambio = motivoCambio,
                 HashSHA256 = hash,
                 FechaCreacion = ahora,
-                TamanoBytes = file.Length
+                TamanoBytes = file.Length,
+                TextoIndexado = textoExtraido
             });
 
             doc.VersionActual = nuevaVersion;
             doc.NumeroVersionActual = siguienteNumero;
             doc.FechaUltimaModificacion = ahora;
+            doc.TextoIndexado = textoExtraido;
 
             // Liberar bloqueo automáticamente y notificar a usuarios en lista de espera
             LiberarDocumento(doc);
@@ -661,6 +1036,14 @@ public class DocumentsController : ControllerBase
 
         var rolDescarga = TryParseRol(rolFinal, out var r) ? r : RolUsuario.Lector;
         string usuarioDescarga = string.IsNullOrWhiteSpace(usuarioFinal) ? "Anónimo" : usuarioFinal.Trim();
+
+        if (!string.IsNullOrWhiteSpace(rolFinal))
+        {
+            string nivelCarpeta = await ObtenerNivelCarpetaDocumentoAsync(doc.CarpetaId, doc.Departamento, rolDescarga.ToString());
+            if (nivelCarpeta == FolderPermissionService.SinAcceso)
+                return await DenegarAccesoAsync(usuarioDescarga, rolDescarga, id, $"descargar archivos de la carpeta restringida '{doc.Departamento}'");
+        }
+
         RegistrarEnBitacora(usuarioDescarga, rolDescarga, doc.Codigo, doc.Nombre, version.VersionTexto,
             AccionBitacora.DESCARGA_ARCHIVO,
             $"Descarga de la versión {version.VersionTexto}. Archivo: {version.NombreArchivo} ({version.TamanoBytes} bytes).");
@@ -675,10 +1058,19 @@ public class DocumentsController : ControllerBase
     /// Devuelve Content-Disposition: inline sin forzar descarga.
     /// </summary>
     [HttpGet("{id:int}/preview")]
-    public async Task<IActionResult> VistaPrevia(int id, [FromQuery] int? versionId)
+    public async Task<IActionResult> VistaPrevia(int id, [FromQuery] int? versionId, [FromQuery] string? usuario = null, [FromQuery] string? rol = null)
     {
         var doc = await _context.Documentos.AsNoTracking().FirstOrDefaultAsync(d => d.Id == id);
         if (doc == null) return NoEncontrado(id);
+
+        string? rolFinal = !string.IsNullOrWhiteSpace(rol) ? rol : Request.Headers["X-Rol"].FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(rolFinal) && TryParseRol(rolFinal, out var rolPreview))
+        {
+            string nivelCarpeta = await ObtenerNivelCarpetaDocumentoAsync(doc.CarpetaId, doc.Departamento, rolPreview.ToString());
+            if (nivelCarpeta == FolderPermissionService.SinAcceso)
+                return await DenegarAccesoAsync(usuario ?? Request.Headers["X-Usuario"].FirstOrDefault(), rolPreview, id,
+                    $"abrir vista previa en la carpeta restringida '{doc.Departamento}'");
+        }
 
         VersionDocumento? version;
         if (versionId.HasValue)
@@ -726,15 +1118,12 @@ public class DocumentsController : ControllerBase
     //  ETIQUETAS (RF-14) Y COMENTARIOS CON MENCIONES (RF-15)
     // ═══════════════════════════════════════════════════════════
 
-    /// <summary>Actualizar etiquetas de un documento (Permitido para Administrador, Revisor y Editor - RF-14).</summary>
+    /// <summary>Actualizar etiquetas de un documento (Requiere nivel Edicion o Administracion en la carpeta - RF-12 / RF-14).</summary>
     [HttpPut("{id:int}/tags")]
     public async Task<IActionResult> ActualizarEtiquetas(int id, [FromBody] SolicitudActualizarEtiquetas solicitud)
     {
         if (!TryParseRol(solicitud.Rol, out var rol))
             return RolInvalido(solicitud.Rol);
-
-        if (rol != RolUsuario.Administrador && rol != RolUsuario.Revisor && rol != RolUsuario.Editor)
-            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, "actualizar etiquetas (no permitido para Lector)");
 
         if (string.IsNullOrWhiteSpace(solicitud.Usuario))
             return Denegado("El usuario es obligatorio.");
@@ -746,6 +1135,10 @@ public class DocumentsController : ControllerBase
             .FirstOrDefaultAsync(d => d.Id == id);
         if (doc == null) return NoEncontrado(id);
         if (doc.Eliminado) return EnPapelera(doc);
+
+        string nivelCarpeta = await ObtenerNivelCarpetaDocumentoAsync(doc.CarpetaId, doc.Departamento, rol.ToString());
+        if (!FolderPermissionService.CumpleNivelMinimo(nivelCarpeta, FolderPermissionService.Edicion))
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, $"actualizar etiquetas en la carpeta '{doc.Departamento}' (nivel actual: {nivelCarpeta})");
 
         string normalizadas = NormalizarEtiquetas(solicitud.Etiquetas);
         if (normalizadas.Length > MaxLongitudEtiquetas)
@@ -771,7 +1164,7 @@ public class DocumentsController : ControllerBase
         {
             mensaje = $"Etiquetas de '{doc.Codigo}' actualizadas correctamente.",
             etiquetas = SepararEtiquetas(doc.Etiquetas),
-            documento = MapearAResumen(doc)
+            documento = MapearAResumen(doc, nivelCarpeta)
         });
     }
 
@@ -792,15 +1185,12 @@ public class DocumentsController : ControllerBase
         return Ok(comentarios);
     }
 
-    /// <summary>Agregar comentario por archivo o versión específica con menciones (Permitido para Admin, Revisor y Editor - RF-15).</summary>
+    /// <summary>Agregar comentario por archivo o versión específica con menciones (Requiere nivel Edicion o Administracion en la carpeta, o Revisor con acceso - RF-12 / RF-15).</summary>
     [HttpPost("{id:int}/comments")]
     public async Task<IActionResult> AgregarComentario(int id, [FromBody] SolicitudAgregarComentario solicitud)
     {
         if (!TryParseRol(solicitud.RolAutor, out var rol))
             return RolInvalido(solicitud.RolAutor);
-
-        if (rol != RolUsuario.Administrador && rol != RolUsuario.Revisor && rol != RolUsuario.Editor)
-            return await DenegarAccesoAsync(solicitud.Autor, rol, id, "publicar comentarios (solo lectura para Lector)");
 
         if (string.IsNullOrWhiteSpace(solicitud.Autor))
             return Denegado("El autor del comentario es obligatorio.");
@@ -814,6 +1204,12 @@ public class DocumentsController : ControllerBase
         var doc = await _context.Documentos.FirstOrDefaultAsync(d => d.Id == id);
         if (doc == null) return NoEncontrado(id);
         if (doc.Eliminado) return EnPapelera(doc);
+
+        string nivelCarpeta = await ObtenerNivelCarpetaDocumentoAsync(doc.CarpetaId, doc.Departamento, rol.ToString());
+        bool puedeComentar = FolderPermissionService.CumpleNivelMinimo(nivelCarpeta, FolderPermissionService.Edicion) ||
+            (rol == RolUsuario.Revisor && nivelCarpeta != FolderPermissionService.SinAcceso);
+        if (!puedeComentar)
+            return await DenegarAccesoAsync(solicitud.Autor, rol, id, $"publicar comentarios en la carpeta '{doc.Departamento}' (nivel actual: {nivelCarpeta})");
 
         string versionNumero = string.IsNullOrWhiteSpace(solicitud.VersionNumero)
             ? "General"
@@ -864,9 +1260,6 @@ public class DocumentsController : ControllerBase
         if (!TryParseRol(solicitud.Rol, out var rol))
             return RolInvalido(solicitud.Rol);
 
-        if (rol != RolUsuario.Editor && rol != RolUsuario.Administrador)
-            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, "restaurar versiones anteriores");
-
         if (string.IsNullOrWhiteSpace(solicitud.Usuario))
             return Denegado("El usuario es obligatorio.");
 
@@ -882,6 +1275,10 @@ public class DocumentsController : ControllerBase
             .FirstOrDefaultAsync(d => d.Id == id);
         if (doc == null) return NoEncontrado(id);
         if (doc.Eliminado) return EnPapelera(doc);
+
+        string nivelCarpeta = await ObtenerNivelCarpetaDocumentoAsync(doc.CarpetaId, doc.Departamento, rol.ToString());
+        if (!FolderPermissionService.CumpleNivelMinimo(nivelCarpeta, FolderPermissionService.Edicion))
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, $"restaurar versiones anteriores en la carpeta '{doc.Departamento}' (nivel actual: {nivelCarpeta})");
 
         // Solo se bloquea si el documento está tomado por OTRO usuario
         if (doc.Bloqueo != null && doc.Bloqueo.UsuarioBloqueador != solicitud.Usuario)
@@ -904,9 +1301,10 @@ public class DocumentsController : ControllerBase
 
         // Copia física independiente del binario (si la versión origen lo tiene)
         string? nuevaRuta = null;
+        string? textoRestaurado = origen.TextoIndexado;
         if (!string.IsNullOrEmpty(origen.RutaArchivo))
         {
-            string? rutaOrigen = ResolverRutaSegura(origen.RutaArchivo);
+            string? rutaOrigen = ResolvePhysicalFilePath(origen.RutaArchivo);
             if (rutaOrigen == null || !System.IO.File.Exists(rutaOrigen))
                 return NotFound(new RespuestaError
                 {
@@ -916,7 +1314,14 @@ public class DocumentsController : ControllerBase
 
             nuevaRuta = $"{id}_{nuevaVersion}_{SanitizarNombre(origen.NombreArchivo)}";
             Directory.CreateDirectory(_storagePath);
-            System.IO.File.Copy(rutaOrigen, Path.Combine(_storagePath, nuevaRuta), overwrite: true);
+            string rutaDestinoFisica = Path.Combine(_storagePath, nuevaRuta);
+            System.IO.File.Copy(rutaOrigen, rutaDestinoFisica, overwrite: true);
+
+            if (string.IsNullOrWhiteSpace(textoRestaurado))
+            {
+                string? rutaResuelta = ResolvePhysicalFilePath(nuevaRuta) ?? rutaDestinoFisica;
+                textoRestaurado = await _contentIndexingService.ExtractTextAsync(rutaResuelta, Path.GetExtension(origen.NombreArchivo));
+            }
         }
 
         try
@@ -932,13 +1337,15 @@ public class DocumentsController : ControllerBase
                 MotivoCambio = motivo,
                 HashSHA256 = origen.HashSHA256,
                 FechaCreacion = ahora,
-                TamanoBytes = origen.TamanoBytes
+                TamanoBytes = origen.TamanoBytes,
+                TextoIndexado = textoRestaurado
             });
 
             string versionAnterior = doc.VersionActual;
             doc.VersionActual = nuevaVersion;
             doc.NumeroVersionActual = siguienteNumero;
             doc.FechaUltimaModificacion = ahora;
+            doc.TextoIndexado = textoRestaurado;
 
             string observaciones = $"Versión {origen.VersionTexto} restaurada como nueva versión vigente {nuevaVersion} " +
                                    $"(anterior vigente: {versionAnterior}). Hash: {origen.HashSHA256[..16]}...";
@@ -973,9 +1380,6 @@ public class DocumentsController : ControllerBase
         if (!TryParseRol(solicitud.Rol, out var rol))
             return RolInvalido(solicitud.Rol);
 
-        if (rol != RolUsuario.Editor && rol != RolUsuario.Administrador)
-            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, "editar metadatos del documento");
-
         if (string.IsNullOrWhiteSpace(solicitud.Usuario))
             return Denegado("El usuario es obligatorio.");
 
@@ -984,6 +1388,10 @@ public class DocumentsController : ControllerBase
         var doc = await CargarDocumentoAsync(id);
         if (doc == null) return NoEncontrado(id);
         if (doc.Eliminado) return EnPapelera(doc);
+
+        string nivelCarpeta = await ObtenerNivelCarpetaDocumentoAsync(doc.CarpetaId, doc.Departamento, rol.ToString());
+        if (!FolderPermissionService.CumpleNivelMinimo(nivelCarpeta, FolderPermissionService.Edicion))
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, $"editar metadatos del documento en la carpeta '{doc.Departamento}' (nivel actual: {nivelCarpeta})");
 
         if (doc.Bloqueo != null && doc.Bloqueo.UsuarioBloqueador != solicitud.Usuario)
             return Conflicto(doc);
@@ -1046,7 +1454,7 @@ public class DocumentsController : ControllerBase
     }
 
     /// <summary>
-    /// Renombrar un documento (RF-03). Permitido para Administrador y Editor,
+    /// Renombrar un documento (RF-03). Requiere nivel Edicion o Administracion en la carpeta (RF-12),
     /// siempre que el archivo no esté eliminado ni bloqueado por otro usuario.
     /// </summary>
     [HttpPut("{id:int}/rename")]
@@ -1054,9 +1462,6 @@ public class DocumentsController : ControllerBase
     {
         if (!TryParseRol(solicitud.Rol, out var rol))
             return RolInvalido(solicitud.Rol);
-
-        if (rol != RolUsuario.Editor && rol != RolUsuario.Administrador)
-            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, "renombrar documentos (solo Administrador o Editor)");
 
         if (string.IsNullOrWhiteSpace(solicitud.Usuario))
             return Denegado("El usuario es obligatorio.");
@@ -1072,6 +1477,10 @@ public class DocumentsController : ControllerBase
         var doc = await CargarDocumentoAsync(id);
         if (doc == null) return NoEncontrado(id);
         if (doc.Eliminado) return EnPapelera(doc);
+
+        string nivelCarpeta = await ObtenerNivelCarpetaDocumentoAsync(doc.CarpetaId, doc.Departamento, rol.ToString());
+        if (!FolderPermissionService.CumpleNivelMinimo(nivelCarpeta, FolderPermissionService.Edicion))
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, $"renombrar documentos en la carpeta '{doc.Departamento}' (nivel actual: {nivelCarpeta})");
 
         if (doc.Bloqueo != null && doc.Bloqueo.UsuarioBloqueador != solicitud.Usuario)
             return Conflicto(doc);
@@ -1098,22 +1507,18 @@ public class DocumentsController : ControllerBase
         return Ok(new
         {
             mensaje = $"Documento '{doc.Codigo}' renombrado a '{nuevoNombre}'.",
-            documento = MapearAResumen(doc)
+            documento = MapearAResumen(doc, nivelCarpeta)
         });
     }
 
     /// <summary>
-    /// Mover un archivo entre carpetas o subcarpetas existentes (Permitido para Administrador, Revisor y Editor,
-    /// siempre que el archivo no esté bloqueado por otro usuario).
+    /// Mover un archivo entre carpetas o subcarpetas existentes (Requiere nivel Edicion o Administracion en origen y destino - RF-12).
     /// </summary>
     [HttpPut("{id}/move")]
     public async Task<IActionResult> MoverDocumento(int id, [FromBody] SolicitudMoverDocumento solicitud)
     {
         if (!TryParseRol(solicitud.Rol, out var rol))
             return RolInvalido(solicitud.Rol);
-
-        if (rol != RolUsuario.Administrador && rol != RolUsuario.Revisor && rol != RolUsuario.Editor)
-            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, "mover archivos entre carpetas");
 
         if (string.IsNullOrWhiteSpace(solicitud.Usuario))
             return Denegado("El usuario es obligatorio.");
@@ -1132,6 +1537,11 @@ public class DocumentsController : ControllerBase
             return Conflicto(doc);
 
         var todasCarpetas = await _context.Carpetas.AsNoTracking().ToListAsync();
+        var todosPermisos = await _context.PermisosCarpeta.AsNoTracking().ToListAsync();
+
+        string nivelOrigen = ResolverNivelCarpetaDocumento(doc.CarpetaId, doc.Departamento, rol.ToString(), todasCarpetas, todosPermisos);
+        if (!FolderPermissionService.CumpleNivelMinimo(nivelOrigen, FolderPermissionService.Edicion))
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, $"mover archivos desde la carpeta '{doc.Departamento}' (nivel actual: {nivelOrigen})");
 
         Carpeta? carpetaDestino = null;
         if (solicitud.CarpetaDestinoId.HasValue)
@@ -1151,6 +1561,10 @@ public class DocumentsController : ControllerBase
                     ? $"La carpeta destino con Id {solicitud.CarpetaDestinoId.Value} no existe."
                     : $"La carpeta destino '{destinoNombre}' no existe."
             });
+
+        string nivelDestino = ResolverNivelCarpetaEfectivoConAncestros(carpetaDestino.Id, rol.ToString(), todasCarpetas, todosPermisos);
+        if (!FolderPermissionService.CumpleNivelMinimo(nivelDestino, FolderPermissionService.Edicion))
+            return await DenegarAccesoAsync(solicitud.Usuario, rol, id, $"mover archivos hacia la carpeta '{carpetaDestino.Nombre}' (se requiere permiso de Edición; nivel actual: {nivelDestino})");
 
         bool yaEstaEnDestino = doc.CarpetaId.HasValue
             ? doc.CarpetaId.Value == carpetaDestino.Id
@@ -1182,7 +1596,7 @@ public class DocumentsController : ControllerBase
         return Ok(new
         {
             mensaje = $"Archivo '{doc.Codigo}' movido de '{rutaOrigen}' a '{rutaDestino}'.",
-            documento = MapearAResumen(doc)
+            documento = MapearAResumen(doc, nivelDestino)
         });
     }
 
@@ -1192,7 +1606,8 @@ public class DocumentsController : ControllerBase
 
     /// <summary>
     /// Crear un documento nuevo (multipart/form-data). El archivo inicial v1.0 es obligatorio,
-    /// el Tipo se detecta automáticamente por la extensión y el Código se autogenera/recalcula si colisiona.
+    /// el Tipo se detecta automáticamente por la extensión, se extrae texto en PDF/TXT (RF-19)
+    /// y se valida el nivel de acceso en la carpeta destino (RF-12).
     /// </summary>
     [HttpPost]
     [Consumes("multipart/form-data")]
@@ -1211,10 +1626,6 @@ public class DocumentsController : ControllerBase
     {
         if (!TryParseRol(rol, out var rolParseado))
             return RolInvalido(rol);
-
-        if (rolParseado != RolUsuario.Administrador && rolParseado != RolUsuario.Editor)
-            return await DenegarAccesoAsync(usuario, rolParseado, null, "crear documentos (solo Administrador o Editor)",
-                codigoReferencia: codigo, nombreReferencia: nombre);
 
         if (string.IsNullOrWhiteSpace(usuario))
             return Denegado("El usuario es obligatorio.");
@@ -1248,6 +1659,12 @@ public class DocumentsController : ControllerBase
                 .FirstOrDefaultAsync(c => c.CarpetaPadreId == null && c.Nombre == depTrim)
                 ?? await _context.Carpetas.AsNoTracking().FirstOrDefaultAsync(c => c.Nombre == depTrim);
         }
+
+        string nivelCarpeta = await ObtenerNivelCarpetaDocumentoAsync(carpetaDestino?.Id ?? carpetaId, carpetaDestino?.Nombre ?? departamento, rolParseado.ToString());
+        if (!FolderPermissionService.CumpleNivelMinimo(nivelCarpeta, FolderPermissionService.Edicion))
+            return await DenegarAccesoAsync(usuario, rolParseado, null,
+                $"subir documentos en la carpeta '{carpetaDestino?.Nombre ?? departamento}' (se requiere permiso de Edición; nivel actual: {nivelCarpeta})",
+                codigoReferencia: codigo, nombreReferencia: nombre);
 
         nombre = nombre.Trim();
         departamento = (carpetaDestino?.Nombre ?? departamento ?? string.Empty).Trim();
@@ -1289,7 +1706,10 @@ public class DocumentsController : ControllerBase
         try
         {
             string hash = await GuardarArchivoAsync(file, nombreAlmacenado);
+            string? rutaFisica = ResolvePhysicalFilePath(nombreAlmacenado);
+            string? textoExtraido = await _contentIndexingService.ExtractTextAsync(rutaFisica, extensionArchivo);
 
+            doc.TextoIndexado = textoExtraido;
             doc.HistorialVersiones.Add(new VersionDocumento
             {
                 NumeroVersion = 1,
@@ -1301,7 +1721,8 @@ public class DocumentsController : ControllerBase
                 MotivoCambio = "Alta del documento en el sistema",
                 HashSHA256 = hash,
                 FechaCreacion = ahora,
-                TamanoBytes = file.Length
+                TamanoBytes = file.Length,
+                TextoIndexado = textoExtraido
             });
 
             string observaciones = $"Documento dado de alta: {codigoFinal} - {nombre} ({tipoDoc}) en carpeta '{departamento}'.";
@@ -1346,10 +1767,6 @@ public class DocumentsController : ControllerBase
         if (!TryParseRol(rol, out var rolParseado))
             return RolInvalido(rol);
 
-        if (rolParseado != RolUsuario.Administrador)
-            return await DenegarAccesoAsync(usuario, rolParseado, id,
-                definitivo ? "eliminar documentos definitivamente (solo Administrador)" : "enviar documentos a la papelera (solo Administrador)");
-
         if (string.IsNullOrWhiteSpace(usuario))
             return Denegado("El usuario es obligatorio.");
 
@@ -1358,6 +1775,19 @@ public class DocumentsController : ControllerBase
             .Include(d => d.HistorialVersiones)
             .FirstOrDefaultAsync(d => d.Id == id);
         if (doc == null) return NoEncontrado(id);
+
+        if (definitivo)
+        {
+            if (rolParseado != RolUsuario.Administrador)
+                return await DenegarAccesoAsync(usuario, rolParseado, id, "eliminar documentos definitivamente (solo Administrador)");
+        }
+        else
+        {
+            string nivelCarpeta = await ObtenerNivelCarpetaDocumentoAsync(doc.CarpetaId, doc.Departamento, rolParseado.ToString());
+            if (!FolderPermissionService.CumpleNivelMinimo(nivelCarpeta, FolderPermissionService.Administracion))
+                return await DenegarAccesoAsync(usuario, rolParseado, id,
+                    $"enviar documentos a la papelera en la carpeta '{doc.Departamento}' (se requiere permiso de Administración en la carpeta; nivel actual: {nivelCarpeta})");
+        }
 
         // ── Paso 1: enviar a la papelera ──
         if (!doc.Eliminado)
@@ -1666,6 +2096,189 @@ public class DocumentsController : ControllerBase
     }
 
     // ═══════════════════════════════════════════════════════════
+    //  BÚSQUEDA E INDEXACIÓN POR CONTENIDO EN PDF Y TXT (RF-19)
+    // ═══════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Buscar documentos activos accesibles por el rol activo donde el contenido extraído (TextoIndexado)
+    /// o su Nombre/Código/Departamento coincidan con la consulta de forma insensible a mayúsculas y acentos (RF-19 + RF-12).
+    /// </summary>
+    [HttpGet("search-content")]
+    public async Task<IActionResult> BuscarPorContenido([FromQuery] string? q, [FromQuery] string? rol = null)
+    {
+        string consulta = q?.Trim() ?? string.Empty;
+        if (consulta.Length == 0)
+            return Ok(Array.Empty<object>());
+
+        string? rolEfectivo = !string.IsNullOrWhiteSpace(rol)
+            ? rol.Trim()
+            : Request.Headers["X-Rol"].FirstOrDefault()?.Trim();
+
+        var todasCarpetas = await _context.Carpetas.AsNoTracking().ToListAsync();
+        var todosPermisos = await _context.PermisosCarpeta.AsNoTracking().ToListAsync();
+
+        var docsActivos = await _context.Documentos
+            .AsNoTracking()
+            .Include(d => d.HistorialVersiones)
+            .Where(d => !d.Eliminado)
+            .OrderBy(d => d.Id)
+            .ToListAsync();
+
+        var resultados = new List<object>();
+
+        foreach (var doc in docsActivos)
+        {
+            string nivelCarpeta = ResolverNivelCarpetaDocumento(doc.CarpetaId, doc.Departamento, rolEfectivo, todasCarpetas, todosPermisos);
+            if (!string.IsNullOrWhiteSpace(rolEfectivo) && nivelCarpeta == FolderPermissionService.SinAcceso)
+                continue;
+
+            bool coincideMetadatos =
+                ContentIndexingService.ContieneIgnorandoAcentos(doc.Nombre, consulta) ||
+                ContentIndexingService.ContieneIgnorandoAcentos(doc.Codigo, consulta) ||
+                ContentIndexingService.ContieneIgnorandoAcentos(doc.Departamento, consulta);
+
+            string? textoVigente = doc.TextoIndexado;
+            if (string.IsNullOrWhiteSpace(textoVigente))
+            {
+                var ultima = doc.HistorialVersiones.OrderByDescending(v => v.NumeroVersion).FirstOrDefault();
+                textoVigente = ultima?.TextoIndexado;
+            }
+
+            bool coincideContenido = !string.IsNullOrWhiteSpace(textoVigente) &&
+                ContentIndexingService.ContieneIgnorandoAcentos(textoVigente, consulta);
+
+            if (!coincideMetadatos && !coincideContenido)
+                continue;
+
+            string? extracto = coincideContenido
+                ? ContentIndexingService.ConstruirExtracto(textoVigente, consulta, 140)
+                : null;
+
+            resultados.Add(new
+            {
+                id = doc.Id,
+                documentoId = doc.Id,
+                codigo = doc.Codigo,
+                nombre = doc.Nombre,
+                carpetaId = doc.CarpetaId,
+                departamento = doc.Departamento,
+                coincidenciaEnContenido = coincideContenido,
+                extractoCoincidencia = extracto
+            });
+        }
+
+        return Ok(resultados);
+    }
+
+    /// <summary>
+    /// Reindexar el contenido de todos los documentos .pdf y .txt activos que tengan archivo físico (Solo Administrador - RF-19).
+    /// Devuelve contadores diagnósticos detallados para verificar extracción real en disco.
+    /// </summary>
+    [HttpPost("reindex-content")]
+    public async Task<IActionResult> ReindexarContenido(
+        [FromBody] SolicitudUsuario? solicitud = null,
+        [FromQuery] string? usuario = null,
+        [FromQuery] string? rol = null)
+    {
+        string? rolRecibido = !string.IsNullOrWhiteSpace(solicitud?.Rol)
+            ? solicitud.Rol
+            : (!string.IsNullOrWhiteSpace(rol) ? rol : Request.Headers["X-Rol"].FirstOrDefault());
+
+        string? usuarioRecibido = !string.IsNullOrWhiteSpace(solicitud?.Usuario)
+            ? solicitud.Usuario
+            : (!string.IsNullOrWhiteSpace(usuario) ? usuario : Request.Headers["X-Usuario"].FirstOrDefault());
+
+        if (!TryParseRol(rolRecibido, out var rolParseado))
+            return RolInvalido(rolRecibido);
+
+        if (rolParseado != RolUsuario.Administrador)
+            return await DenegarAccesoAsync(usuarioRecibido, rolParseado, null,
+                "reindexar el contenido de documentos PDF y TXT (exclusivo para Administrador)",
+                codigoReferencia: "INDEX", nombreReferencia: "Reindexación PDF/TXT");
+
+        string actor = string.IsNullOrWhiteSpace(usuarioRecibido) ? "Elena Martínez" : usuarioRecibido.Trim();
+
+        var todosActivos = await _context.Documentos
+            .Include(d => d.HistorialVersiones)
+            .Where(d => !d.Eliminado)
+            .ToListAsync();
+
+        static bool EsPdfOTxt(Documento d, VersionDocumento? ultima)
+        {
+            if (d.Tipo == TipoDocumento.PDF || d.Tipo == TipoDocumento.Texto)
+                return true;
+            if (ultima != null)
+            {
+                string extRuta = Path.GetExtension(ultima.RutaArchivo ?? string.Empty).ToLowerInvariant();
+                string extNombre = Path.GetExtension(ultima.NombreArchivo ?? string.Empty).ToLowerInvariant();
+                if (extRuta is ".pdf" or ".txt" || extNombre is ".pdf" or ".txt")
+                    return true;
+            }
+            return false;
+        }
+
+        int totalCandidatos = 0;
+        int indexadosConTexto = 0;
+        int sinArchivoEnDisco = 0;
+        int sinTextoExtraible = 0;
+
+        foreach (var doc in todosActivos)
+        {
+            var versionesOrdenadas = doc.HistorialVersiones.OrderBy(v => v.NumeroVersion).ToList();
+            var ultima = versionesOrdenadas.LastOrDefault();
+
+            if (!EsPdfOTxt(doc, ultima))
+                continue;
+
+            totalCandidatos++;
+
+            foreach (var version in versionesOrdenadas)
+            {
+                string? rutaFisica = ResolvePhysicalFilePath(version.RutaArchivo);
+                if (rutaFisica == null)
+                    continue;
+
+                string ext = Path.GetExtension(rutaFisica);
+                if (string.IsNullOrWhiteSpace(ext))
+                    ext = Path.GetExtension(version.NombreArchivo);
+                if (string.IsNullOrWhiteSpace(ext))
+                    ext = doc.Tipo == TipoDocumento.Texto ? ".txt" : ".pdf";
+
+                version.TextoIndexado = await _contentIndexingService.ExtractTextAsync(rutaFisica, ext);
+            }
+
+            if (ultima == null || ResolvePhysicalFilePath(ultima.RutaArchivo) == null)
+            {
+                sinArchivoEnDisco++;
+                doc.TextoIndexado = ultima?.TextoIndexado;
+            }
+            else
+            {
+                doc.TextoIndexado = ultima.TextoIndexado;
+                if (!string.IsNullOrWhiteSpace(doc.TextoIndexado))
+                    indexadosConTexto++;
+                else
+                    sinTextoExtraible++;
+            }
+        }
+
+        RegistrarEnBitacora(actor, rolParseado, "INDEX", "Índice de Contenido PDF/TXT", "-",
+            AccionBitacora.REINDEXAR_CONTENIDO,
+            $"Reindexación PDF/TXT ejecutada. Candidatos: {totalCandidatos}, indexados con texto: {indexadosConTexto}, sin archivo en disco: {sinArchivoEnDisco}, sin texto extraíble: {sinTextoExtraible}.");
+
+        await _context.SaveChangesAsync();
+
+        return Ok(new
+        {
+            totalCandidatos,
+            indexadosConTexto,
+            sinArchivoEnDisco,
+            sinTextoExtraible,
+            mensaje = $"Reindexación lista: {indexadosConTexto} PDF/TXT indexados con texto (de {totalCandidatos} candidatos; sin archivo en disco: {sinArchivoEnDisco}, sin texto extraíble: {sinTextoExtraible})."
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════
     //  HELPERS PRIVADOS
     // ═══════════════════════════════════════════════════════════
 
@@ -1867,38 +2480,56 @@ public class DocumentsController : ControllerBase
 
     /// <summary>
     /// Resuelve de forma robusta la ruta física existente de un archivo guardado:
-    /// 1) Directa en Storage, 2) Ruta directa si existe, 3) Relativa a ContentRootPath, 4) Storage + FileName.
+    /// 1) rutaArchivo directa, 2) relativa a ContentRootPath, 3) dentro de /Storage por nombre de archivo,
+    /// 4) fallback NFC/NFD en /Storage para nombres con acentos descompuestos.
     /// </summary>
-    private string? ResolverRutaArchivoFisico(string? rutaArchivo)
+    private string? ResolvePhysicalFilePath(string? rutaArchivo)
     {
         if (string.IsNullOrWhiteSpace(rutaArchivo)) return null;
 
-        // 1. Directa dentro de /Storage
-        string? enStorage = ResolverRutaSegura(rutaArchivo);
-        if (enStorage != null && System.IO.File.Exists(enStorage))
-            return enStorage;
-
-        // 2. Ruta directa tal como está guardada (si es absoluta o relativa al directorio actual)
+        // 1. Ruta directa tal como está guardada (absoluta o relativa al directorio actual)
         if (System.IO.File.Exists(rutaArchivo))
             return Path.GetFullPath(rutaArchivo);
 
-        // 3. Relativa al ContentRootPath del backend
+        // 2. Relativa al ContentRootPath del backend
         string relativaRoot = Path.GetFullPath(Path.Combine(_contentRootPath, rutaArchivo));
         if (relativaRoot.StartsWith(_contentRootPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
             && System.IO.File.Exists(relativaRoot))
             return relativaRoot;
 
-        // 4. Fallback seguro: Storage + nombre de archivo
+        // 3. Directa dentro de /Storage o usando Storage + FileName
+        string? enStorage = ResolverRutaSegura(rutaArchivo);
+        if (enStorage != null && System.IO.File.Exists(enStorage))
+            return enStorage;
+
         string soloNombre = Path.GetFileName(rutaArchivo);
         if (!string.IsNullOrWhiteSpace(soloNombre))
         {
             string? fallbackStorage = ResolverRutaSegura(soloNombre);
             if (fallbackStorage != null && System.IO.File.Exists(fallbackStorage))
                 return fallbackStorage;
+
+            // 4. Fallback Unicode FormC dentro de /Storage (evita fallos entre acentos NFC vs NFD en Windows)
+            if (Directory.Exists(_storagePath))
+            {
+                string objetivoNorm = soloNombre.Normalize(System.Text.NormalizationForm.FormC);
+                foreach (var candidato in Directory.EnumerateFiles(_storagePath))
+                {
+                    if (string.Equals(
+                        Path.GetFileName(candidato).Normalize(System.Text.NormalizationForm.FormC),
+                        objetivoNorm,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        return candidato;
+                    }
+                }
+            }
         }
 
         return null;
     }
+
+    private string? ResolverRutaArchivoFisico(string? rutaArchivo) => ResolvePhysicalFilePath(rutaArchivo);
 
     /// <summary>Borra un archivo de /Storage sin lanzar excepciones (con protección contra path traversal).</summary>
     private void BorrarArchivoFisico(string? nombreAlmacenado)
@@ -2099,11 +2730,84 @@ public class DocumentsController : ControllerBase
         return string.Join(" / ", segmentos);
     }
 
-    private DocumentoResumen MapearAResumen(Documento doc)
+    private async Task<string> ObtenerNivelCarpetaDocumentoAsync(int? carpetaId, string? departamentoFallback, string? rol)
+    {
+        var todasCarpetas = await _context.Carpetas.AsNoTracking().ToListAsync();
+        var todosPermisos = await _context.PermisosCarpeta.AsNoTracking().ToListAsync();
+        return ResolverNivelCarpetaDocumento(carpetaId, departamentoFallback, rol, todasCarpetas, todosPermisos);
+    }
+
+    private string ResolverNivelCarpetaDocumento(
+        int? carpetaId,
+        string? departamentoFallback,
+        string? rol,
+        IReadOnlyList<Carpeta> todasCarpetas,
+        IReadOnlyList<PermisoCarpeta> todosPermisos)
+    {
+        if (string.IsNullOrWhiteSpace(rol))
+            return FolderPermissionService.Administracion;
+
+        int? idResuelto = FolderPermissionService.ResolverCarpetaId(carpetaId, departamentoFallback, todasCarpetas);
+        if (!idResuelto.HasValue)
+            return FolderPermissionService.ObtenerNivelPorDefecto(rol);
+
+        return ResolverNivelCarpetaEfectivoConAncestros(idResuelto.Value, rol, todasCarpetas, todosPermisos);
+    }
+
+    /// <summary>
+    /// Resuelve el nivel efectivo de una carpeta garantizando que si algún ancestro tiene "SinAcceso",
+    /// toda su descendencia quede bloqueada con "SinAcceso" para ese rol.
+    /// </summary>
+    private string ResolverNivelCarpetaEfectivoConAncestros(
+        int carpetaId,
+        string? rol,
+        IReadOnlyList<Carpeta> todasCarpetas,
+        IReadOnlyList<PermisoCarpeta> todosPermisos)
+    {
+        if (string.IsNullOrWhiteSpace(rol) || string.Equals(rol.Trim(), "Administrador", StringComparison.OrdinalIgnoreCase))
+            return FolderPermissionService.Administracion;
+
+        var mapa = todasCarpetas.ToDictionary(c => c.Id);
+        var visitados = new HashSet<int>();
+        int? cursorId = carpetaId;
+        while (cursorId.HasValue && visitados.Add(cursorId.Value) && mapa.TryGetValue(cursorId.Value, out var actual))
+        {
+            var resCursor = _folderPermissionService.ResolverPermisoEnMemoria(actual.Id, rol, todasCarpetas, todosPermisos);
+            if (resCursor.NivelEfectivo == FolderPermissionService.SinAcceso)
+                return FolderPermissionService.SinAcceso;
+            cursorId = actual.CarpetaPadreId;
+        }
+
+        var res = _folderPermissionService.ResolverPermisoEnMemoria(carpetaId, rol, todasCarpetas, todosPermisos);
+        return res.NivelEfectivo;
+    }
+
+    private async Task<int> ObtenerDiasRetencionPapeleraAsync()
+    {
+        var config = await _context.ConfiguracionesSistema
+            .AsNoTracking()
+            .FirstOrDefaultAsync(c => c.Clave == "PapeleraDiasRetencion");
+
+        if (config != null && int.TryParse(config.Valor, out int dias) && dias >= 1 && dias <= 365)
+            return dias;
+
+        return 30;
+    }
+
+    private DocumentoResumen MapearAResumen(Documento doc, string nivelAccesoCarpeta = FolderPermissionService.Lectura, int diasRetencionPapelera = 30)
     {
         var ultimaVersion = doc.HistorialVersiones
             .OrderByDescending(v => v.NumeroVersion)
             .FirstOrDefault();
+
+        DateTime? fechaPurga = null;
+        int? diasRestantes = null;
+        if (doc.Eliminado && doc.FechaEliminacion.HasValue)
+        {
+            fechaPurga = doc.FechaEliminacion.Value.AddDays(diasRetencionPapelera);
+            double diffDias = (fechaPurga.Value - DateTime.UtcNow).TotalDays;
+            diasRestantes = Math.Max(0, (int)Math.Ceiling(diffDias));
+        }
 
         return new DocumentoResumen
         {
@@ -2136,7 +2840,10 @@ public class DocumentsController : ControllerBase
             FechaUltimaVersion = ultimaVersion?.FechaCreacion ?? doc.FechaUltimaModificacion,
             TieneArchivoFisico = ResolverRutaArchivoFisico(ultimaVersion?.RutaArchivo) != null,
             Etiquetas = SepararEtiquetas(doc.Etiquetas),
-            TotalComentarios = doc.Comentarios.Count
+            TotalComentarios = doc.Comentarios.Count,
+            NivelAccesoCarpeta = nivelAccesoCarpeta,
+            FechaPurgaAutomatica = fechaPurga,
+            DiasRestantesPapelera = diasRestantes
         };
     }
 
